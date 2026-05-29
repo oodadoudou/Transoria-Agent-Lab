@@ -1,0 +1,69 @@
+.grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 0;
+}
+
+.cell {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--hairline-strong, #d8d2c7);
+  transition: background 220ms ease, opacity 220ms ease;
+}
+
+.pending {
+  background: var(--hairline-strong, #d8d2c7);
+}
+
+.completed {
+  background: var(--success, #2f7d57);
+}
+
+.failed {
+  background: var(--warn, #b6541b);
+}
+
+.skipped {
+  background: var(--muted, #7a7166);
+  opacity: 0.55;
+}
+
+/* Running cells breathe via opacity only — no glow ring, no scale.
+ * Matches the rest of the panel-soft / hairline visual language. */
+.running {
+  background: var(--accent, #ad9d7a);
+  animation: cellBreathe 1.6s ease-in-out infinite;
+}
+
+@keyframes cellBreathe {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .running {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+.canvasWrap {
+  display: block;
+  padding: 8px 0;
+}
+
+.canvas {
+  display: block;
+  width: 100%;
+  height: 16px;
+  border-radius: 4px;
+}

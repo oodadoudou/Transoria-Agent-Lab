@@ -1,0 +1,39 @@
+.shell {
+  min-height: 100vh;
+  padding: 18px 24px;
+  background: var(--canvas);
+}
+
+.app {
+  min-height: calc(100vh - 36px);
+  display: grid;
+  column-gap: 28px;
+  row-gap: 18px;
+}
+
+.withInspector {
+  grid-template-columns: 200px minmax(560px, 1fr);
+  grid-template-rows: auto 1fr auto;
+  grid-template-areas:
+    'topbar topbar'
+    'rail   main'
+    'rail   status';
+}
+
+.minimal {
+  grid-template-columns: 200px minmax(560px, 1fr);
+  grid-template-rows: auto 1fr;
+  grid-template-areas:
+    'topbar topbar'
+    'rail   main';
+}
+
+.main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  gap: 36px;
+  min-width: 0;
+  max-width: 980px;
+  padding: 8px 0 32px;
+}

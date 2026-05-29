@@ -1,0 +1,38 @@
+[project]
+name = "transoria"
+version = "1.2.4"
+description = "Lightweight desktop workflows for novel translation, glossary extraction, and batch text replacement."
+requires-python = ">=3.11"
+dependencies = [
+  "lxml>=5.0",
+  "httpx>=0.27",
+  "json-repair>=0.30",
+  "openpyxl>=3.1",
+  "pillow>=10.0",
+  # 6.x/7.x ship .bin ML models that Windows AV quarantines.
+  "chardet>=5.2,<6",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "opencc-python-reimplemented>=0.1.7",
+]
+gui = [
+  "pywebview>=5.0",
+]
+build = [
+  "pyinstaller>=6.0",
+]
+
+# Without this, setuptools' flat-layout auto-discovery aborts because
+# the repo root contains multiple top-level dirs (``assets/``,
+# ``frontend/``, ``transoria/``) — only ``transoria`` is the Python
+# package; the others are static assets bundled separately by the
+# build scripts.
+[tool.setuptools.packages.find]
+include = ["transoria*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

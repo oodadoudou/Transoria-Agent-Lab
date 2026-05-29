@@ -1,0 +1,237 @@
+/*
+ * Sidebar rail — flat. No card, no border, no fill. Just a vertical menu
+ * list sitting on the cream canvas. Active items get a warm-graphite pill
+ * fill so they're the only visual weight in the column.
+ */
+.rail {
+  grid-area: rail;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 6px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.label {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 10.5px;
+  color: var(--muted);
+  padding: 16px 10px 8px;
+  font-weight: 600;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border-radius: var(--radius-avatar);
+  color: var(--ink-soft);
+  font-size: 13px;
+  text-decoration: none;
+  font-weight: 500;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+  font-family: inherit;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.row:hover:not(.active) {
+  background: var(--panel-soft);
+}
+
+.parent {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.parent:hover {
+  background: var(--panel-soft);
+}
+
+.child {
+  padding-left: 28px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.leaf {
+  font-weight: 500;
+}
+
+.active,
+.active:hover {
+  background: var(--action);
+  color: var(--action-fg);
+}
+
+.active.parent {
+  color: var(--action-fg);
+}
+
+.ind {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.active .ind {
+  background: var(--accent);
+}
+
+.children {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 1px 0 4px;
+}
+
+.label2 {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform 160ms ease;
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+.sep {
+  height: 0;
+  margin: 12px 0;
+}
+
+.footer {
+  margin-top: auto;
+  padding: 18px 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.githubLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  padding: 7px 12px;
+  border: 1px solid #f0c84d;
+  border-radius: 999px;
+  color: #b85414;
+  background: rgba(255, 249, 224, 0.52);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.githubLink:hover {
+  background: #fff8d8;
+  border-color: #e6b72f;
+  color: #9d4210;
+  transform: translateY(-1px);
+}
+
+.githubLink:focus-visible {
+  outline: 2px solid rgba(184, 84, 20, 0.34);
+  outline-offset: 3px;
+}
+
+.githubStar {
+  color: #e7ae1a;
+  font-size: 17px;
+  line-height: 0.8;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.75);
+  display: inline-block;
+  /* Breathing pulse — gentle opacity + scale loop on the star alone.
+   * 2.6s cycle is long enough to read as alive but not distracting.
+   * ``transform-origin: center`` keeps the surrounding text steady. */
+  transform-origin: center;
+  animation: githubStarBreath 2.6s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+
+@keyframes githubStarBreath {
+  0%,
+  100% {
+    opacity: 0.7;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .githubStar {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.githubFace {
+  margin-left: 3px;
+  color: #a84a12;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.watermark {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 8px 4px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  opacity: 0.6;
+  user-select: none;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.watermarkApp {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.watermarkSep {
+  opacity: 0.6;
+}
+
+.watermarkAuthor {
+  font-weight: 400;
+  color: var(--muted);
+}
