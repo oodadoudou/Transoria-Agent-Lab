@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from transoria.agent.configuration_agent import parse_agent_response
+from transoria.agent.configuration_agent import (
+    AGENT_SYSTEM_PROMPT,
+    build_user_prompt,
+    parse_agent_response,
+)
 
 
 def test_parse_plain_json_object() -> None:
@@ -88,3 +92,25 @@ def test_parse_valid_draft() -> None:
     assert draft.kind == "update_memory"
     assert draft.status == "pending"
     assert draft.payload == {"memories": ["a"]}
+
+
+def test_system_prompt_documents_phase_b3_configuration_rules() -> None:
+    assert "ask a concise follow-up question" in AGENT_SYSTEM_PROMPT
+    assert "Do not silently invent" in AGENT_SYSTEM_PROMPT
+    assert "create_model_profile" in AGENT_SYSTEM_PROMPT
+    assert "update_model_profile" in AGENT_SYSTEM_PROMPT
+    assert "weak model" in AGENT_SYSTEM_PROMPT
+    assert "Never save API" in AGENT_SYSTEM_PROMPT
+
+
+def test_build_user_prompt_includes_response_checklist() -> None:
+    prompt = build_user_prompt(
+        user_message="配置一个翻译 preset",
+        inventory={"profiles": [{"id": "profile-a"}]},
+        current_state={"workflow_model_id": "profile-a"},
+    )
+
+    assert "Response checklist:" in prompt
+    assert "Ask a follow-up instead of inventing missing config." in prompt
+    assert "Warn about weak/low-cost models" in prompt
+    assert "配置一个翻译 preset" in prompt

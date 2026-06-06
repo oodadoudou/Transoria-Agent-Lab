@@ -443,6 +443,12 @@ def _generate_reply(
             )
         except BridgeError as exc:
             return (f"{reply}\n\n（已忽略无法应用的草案：{exc}）".strip(), None)
+        reply = _append_model_quality_warnings(
+            reply,
+            draft=draft,
+            state=state,
+            profile_store=profile_store,
+        )
     return reply, draft
 
 
@@ -523,6 +529,131 @@ def _validate_draft(
         cache_root=cache_root,
         task_service=task_service,
     )
+
+
+def _append_model_quality_warnings(
+    reply: str,
+    *,
+    draft: AgentActionDraft,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+) -> str:
+    warnings = _model_quality_warnings(
+        draft,
+        state=state,
+        profile_store=profile_store,
+    )
+    if not warnings:
+        return reply
+    suffix = "模型风险提示：" + "；".join(warnings)
+    if suffix in reply:
+        return reply
+    return f"{reply}\n\n{suffix}"
+
+
+def _model_quality_warnings(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+) -> list[str]:
+    seen: set[tuple[str, str]] = set()
+    warnings: list[str] = []
+
+    def add(slot: str, profile: ModelConfig | None) -> None:
+        if profile is None:
+            return
+        risk = _profile_quality_risk(profile)
+        if risk is None:
+            return
+        key = (slot, profile.id)
+        if key in seen:
+            return
+        seen.add(key)
+        stage = _stage_label(slot)
+        warnings.append(f"{stage}使用 {profile.display_name}（{profile.model_id}）{risk}")
+
+    if draft.kind == "update_workspace":
+        for slot, profile_id in _model_slot_ids_from_payload(draft.payload).items():
+            add(slot, profile_store.get(profile_id))
+        workflow_id = draft.payload.get("workflow_model_id")
+        if isinstance(workflow_id, str) and workflow_id:
+            profile = profile_store.get(workflow_id)
+            if profile is not None and _profile_quality_risk(profile) is not None:
+                add("workflow", profile)
+    elif draft.kind in {"create_recipe", "update_recipe"}:
+        for slot, profile_id in _model_slot_ids_from_payload(draft.payload).items():
+            add(slot, profile_store.get(profile_id))
+    elif draft.kind == "apply_recipe":
+        recipe = state.get_recipe(
+            str(draft.payload.get("recipe_id") or draft.payload.get("id") or "")
+        )
+        if recipe is not None:
+            for slot, profile_id in recipe.stage_model_ids.items():
+                if profile_id:
+                    add(slot, profile_store.get(profile_id))
+    elif draft.kind == "create_model_profile":
+        try:
+            add("new_profile", _model_profile_from_draft_payload(draft.payload))
+        except BridgeError:
+            return warnings
+    elif draft.kind == "update_model_profile":
+        profile_id, patch, _api_keys = _coerce_model_profile_update_payload(
+            draft.payload
+        )
+        current = profile_store.get(profile_id)
+        if current is not None:
+            preview = current
+            if patch:
+                try:
+                    preview = replace(
+                        current,
+                        **_coerce_model_profile_patch(patch),  # type: ignore[arg-type]
+                    )
+                except BridgeError:
+                    preview = current
+            add("updated_profile", preview)
+
+    return warnings
+
+
+def _model_slot_ids_from_payload(payload: Mapping[str, object]) -> dict[str, str]:
+    raw = payload.get("stage_model_ids")
+    if not isinstance(raw, Mapping):
+        return {}
+    result: dict[str, str] = {}
+    for slot, value in raw.items():
+        if isinstance(value, str) and value:
+            result[str(slot)] = value
+    return result
+
+
+def _profile_quality_risk(profile: ModelConfig) -> str | None:
+    label = f"{profile.display_name} {profile.model_id}".lower()
+    weak_markers = (
+        "flash",
+        "mini",
+        "lite",
+        "nano",
+        "small",
+        "fast",
+        "cheap",
+        "haiku",
+    )
+    if not any(marker in label for marker in weak_markers):
+        return None
+    return "看起来是快速或低成本档，质量、术语一致性和复杂上下文理解可能弱于高质量模型"
+
+
+def _stage_label(slot: str) -> str:
+    return {
+        "workflow": "工作模型",
+        "translation": "翻译阶段",
+        "term_extract": "术语提取阶段",
+        "term_review": "术语审核阶段",
+        "new_profile": "新模型配置",
+        "updated_profile": "被更新的模型配置",
+    }.get(slot, slot)
 
 
 def _agent_action_spec(kind: str) -> _AgentActionSpec:
@@ -1507,7 +1638,7 @@ def _coerce_model_profile_patch(patch: Mapping[str, object]) -> dict[str, object
 def _coerce_api_keys(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
-    if not isinstance(value, list):
+    if not isinstance(value, (list, tuple)):
         raise BridgeError.invalid_argument(
             "api_keys must be a list of strings.",
             field="api_keys",

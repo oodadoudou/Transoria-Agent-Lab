@@ -64,6 +64,21 @@ def _seed_profile(cache_root: Path) -> ModelConfig:
     )
 
 
+def _seed_weak_profile(cache_root: Path) -> ModelConfig:
+    store = ModelProfileStore.from_cache_root(cache_root)
+    return store.create(
+        ModelConfig(
+            id="profile-flash",
+            display_name="Flash Budget",
+            provider_format=ProviderFormat.OPENAI,
+            base_url="https://example.com/v1",
+            model_id="gemini-3-flash",
+            api_keys=("weak-key",),
+            concurrency_limit=8,
+        )
+    )
+
+
 def test_read_workspace_returns_default_history_and_inventory(tmp_path: Path) -> None:
     _seed_profile(tmp_path)
     router = build_default_router(cache_root=tmp_path)
@@ -1112,6 +1127,69 @@ def test_agent_update_model_profile_draft_can_rotate_keys_with_masked_preview(
     assert stored is not None
     assert stored.api_keys == (secret,)
     assert stored.concurrency_limit == 5
+
+
+def test_agent_warns_when_weak_model_selected_for_translation(
+    tmp_path: Path,
+) -> None:
+    _seed_weak_profile(tmp_path)
+    router, _ = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "I prepared a model selection draft.",
+          "draft": {
+            "kind": "update_workspace",
+            "title": "Use flash for translation",
+            "summary": "Selects the budget model for translation.",
+            "payload": {
+              "stage_model_ids": {"translation": "profile-flash"}
+            }
+          }
+        }
+        """,
+    )
+
+    response = router.call("agent.send_message", {"message": "翻译阶段用 flash"})
+    content = response["workspace"]["messages"][-1]["content"]
+
+    assert response["workspace"]["pending_draft"]["kind"] == "update_workspace"
+    assert "模型风险提示" in content
+    assert "翻译阶段" in content
+    assert "gemini-3-flash" in content
+
+
+def test_agent_warns_when_creating_weak_model_profile(tmp_path: Path) -> None:
+    router, _ = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "I prepared a model profile draft.",
+          "draft": {
+            "kind": "create_model_profile",
+            "title": "Create flash model",
+            "summary": "Adds a budget model.",
+            "payload": {
+              "profile": {
+                "id": "new-flash",
+                "display_name": "Flash Agent",
+                "provider_format": "openai",
+                "base_url": "https://example.com/v1",
+                "model_id": "gemini-3-flash-agent"
+              }
+            }
+          }
+        }
+        """,
+    )
+
+    response = router.call("agent.send_message", {"message": "加一个 flash 模型"})
+    content = response["workspace"]["messages"][-1]["content"]
+
+    assert response["workspace"]["pending_draft"]["kind"] == "create_model_profile"
+    assert "模型风险提示" in content
+    assert "新模型配置" in content
+    assert "gemini-3-flash-agent" in content
 
 
 def test_agent_update_prompt_preset_draft_applies_to_custom_prompt(

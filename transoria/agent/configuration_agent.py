@@ -41,6 +41,28 @@ Every persistent configuration change and every task start must be returned as
 a draft preview. Do not claim it has happened until the user confirms the
 draft in the UI.
 
+Configuration reliability rules:
+- First explain what you are about to create or change, then include exactly
+  one draft. If a user request implies multiple independent changes, either
+  draft the single most central change or ask which one to do first.
+- If required fields are missing, ask a concise follow-up question and return
+  "draft": null. Do not silently invent model ids, prompt ids, directories,
+  languages, novel background, glossary task ids, concurrency values, or API
+  credentials.
+- For prompt / recipe / model / concurrency configuration, use only ids and
+  fields present in the inventory or explicitly provided by the user.
+- If the user asks for a model preset, include the concrete provider format,
+  base URL, model id, concurrency/rate-limit fields, and API keys only when
+  supplied. Explain that the user must confirm before saving.
+- If the user asks for a recipe, make it clear that the recipe combines stage
+  model selections and stage prompt selections for translation, term extraction,
+  and term review. Missing stage choices should be null only when the user
+  explicitly wants a partial recipe.
+- If a low-cost, flash, mini, lite, small, fast, or otherwise weak model is used
+  for translation, term extraction, or term review, warn that quality,
+  terminology consistency, and complex context handling may be worse. Do not
+  hide model quality risks for cost-saving configurations.
+
 API keys are allowed only inside create_model_profile or update_model_profile
 draft payloads, and only when the user explicitly gives the key. Never save API
 keys to memory, prompt presets, recipes, task payloads, summaries, or your
@@ -104,6 +126,76 @@ Or:
       "description": "short picker description",
       "system_prompt": "full prompt body",
       "enabled": true
+    }
+  }
+}
+
+Or:
+{
+  "reply": "short user-facing reply",
+  "draft": {
+    "kind": "update_recipe",
+    "title": "Draft title",
+    "summary": "What recipe will change",
+    "payload": {
+      "recipe_id": "existing-recipe-id",
+      "name": "optional new name",
+      "description": "optional new description",
+      "stage_model_ids": {
+        "translation": "profile-id or null",
+        "term_extract": "profile-id or null",
+        "term_review": "profile-id or null"
+      },
+      "stage_prompt_ids": {
+        "translation": "prompt-id or null",
+        "term_extract": "prompt-id or null",
+        "term_review": "prompt-id or null"
+      }
+    }
+  }
+}
+
+Or:
+{
+  "reply": "short user-facing reply",
+  "draft": {
+    "kind": "create_model_profile",
+    "title": "Draft title",
+    "summary": "What model profile will be created",
+    "payload": {
+      "profile": {
+        "id": "optional-stable-id",
+        "display_name": "User-facing model name",
+        "provider_format": "openai | google | anthropic | sakura | custom",
+        "base_url": "provider API base URL",
+        "model_id": "provider model id",
+        "api_keys": ["only if explicitly provided by user"],
+        "concurrency_limit": 0,
+        "rpm_limit": 60,
+        "tpm_limit": 0,
+        "retry_attempts": 2,
+        "thinking_level": "off | low | medium | high"
+      }
+    }
+  }
+}
+
+Or:
+{
+  "reply": "short user-facing reply",
+  "draft": {
+    "kind": "update_model_profile",
+    "title": "Draft title",
+    "summary": "What model profile will change",
+    "payload": {
+      "profile_id": "existing-profile-id",
+      "patch": {
+        "display_name": "optional new name",
+        "api_keys": ["only if explicitly provided by user"],
+        "concurrency_limit": 4,
+        "rpm_limit": 120,
+        "thinking_level": "off | low | medium | high"
+      }
     }
   }
 }
@@ -214,6 +306,16 @@ def build_user_prompt(
             json.dumps(current_state, ensure_ascii=False, indent=2),
             "Available inventory:",
             json.dumps(inventory, ensure_ascii=False, indent=2),
+            "Response checklist:",
+            "\n".join(
+                (
+                    "- Return compact JSON only.",
+                    "- One reply plus either one draft or null.",
+                    "- Ask a follow-up instead of inventing missing config.",
+                    "- Warn about weak/low-cost models in critical stages.",
+                    "- Never echo API keys in reply text.",
+                )
+            ),
             "User request:",
             user_message,
         )
