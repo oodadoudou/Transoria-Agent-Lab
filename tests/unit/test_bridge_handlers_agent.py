@@ -13,7 +13,10 @@ from transoria.llm.client import ChatRequest, ChatResponse, LlmRequestError
 from transoria.llm.config import ModelConfig, ProviderFormat
 from transoria.llm.usage import TokenUsage
 from transoria.model_profiles import ModelProfileStore
-from transoria.prompts import DEFAULT_TRANSLATION_PRESET_ID
+from transoria.prompts import (
+    DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
+    DEFAULT_TRANSLATION_PRESET_ID,
+)
 from transoria.runtime.task_record import TaskRecord
 
 
@@ -732,6 +735,112 @@ def test_agent_start_task_draft_is_blocked_by_active_task(
     assert "检测到当前正在执行 translation 任务" in response["workspace"]["messages"][-1][
         "content"
     ]
+
+
+def test_agent_active_task_lock_clears_after_terminal_cache_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_start_agent_task(**kwargs: object) -> dict[str, object]:
+        service = kwargs["task_service"]
+        assert isinstance(service, TaskService)
+        service.cache.save_task(
+            TaskRecord(
+                id="translation-agent-done",
+                kind=TaskKind.TRANSLATION,
+                status=TaskStatus.COMPLETED,
+            )
+        )
+        return {
+            "task_id": "translation-agent-done",
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        "transoria.bridge.handlers.agent.start_agent_task",
+        fake_start_agent_task,
+    )
+    input_dir = tmp_path / "novel"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "book.txt").write_text("source text", encoding="utf-8")
+    router, _ = _router_with_workflow(
+        tmp_path,
+        f"""
+        {{
+          "reply": "Ready to start translation.",
+          "draft": {{
+            "kind": "start_translation_task",
+            "title": "Start translation",
+            "summary": "Use per-task chat overrides.",
+            "payload": {{
+              "input_dir": "{input_dir}",
+              "output_dir": "{output_dir}",
+              "source_language": "kr",
+              "target_language": "zh"
+            }}
+          }}
+        }}
+        """,
+    )
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "stage_model_ids": {"translation": "profile-workflow"},
+                "stage_prompt_ids": {
+                    "translation": DEFAULT_TRANSLATION_PRESET_ID,
+                },
+            }
+        },
+    )
+    draft = router.call("agent.send_message", {"message": "start translation"})[
+        "workspace"
+    ]["pending_draft"]
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+    assert applied["workspace"]["active_task"]["task_id"] == "translation-agent-done"
+
+    reloaded = router.call("agent.read_workspace", {})["workspace"]
+    assert reloaded["active_task"] is None
+
+
+def test_glossary_review_start_draft_with_unknown_task_id_is_dropped(
+    tmp_path: Path,
+) -> None:
+    router, _ = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "Ready to review glossary.",
+          "draft": {
+            "kind": "start_glossary_review_task",
+            "title": "Start glossary review",
+            "summary": "Review a glossary task.",
+            "payload": {
+              "glossary_task_id": "missing-glossary-task"
+            }
+          }
+        }
+        """,
+    )
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "stage_model_ids": {"term_review": "profile-workflow"},
+                "stage_prompt_ids": {
+                    "term_review": DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
+                },
+            }
+        },
+    )
+
+    response = router.call("agent.send_message", {"message": "review glossary"})
+
+    assert response["workspace"]["pending_draft"] is None
+    assert "已忽略无法应用的草案" in response["workspace"]["messages"][-1]["content"]
 
 
 def test_send_message_calls_api_with_system_prompt_and_inventory(
