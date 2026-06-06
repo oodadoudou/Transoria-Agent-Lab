@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -1023,6 +1024,267 @@ def test_agent_prompt_preset_then_selectable_in_inventory(tmp_path: Path) -> Non
         {"patch": {"stage_prompt_ids": {"translation": preset_id}}},
     )["workspace"]
     assert selected["stage_prompt_ids"]["translation"] == preset_id
+
+
+def test_agent_create_model_profile_draft_masks_api_key_preview(
+    tmp_path: Path,
+) -> None:
+    secret = "sk-local-secret-123456"
+    router, _ = _router_with_workflow(
+        tmp_path,
+        f"""
+        {{
+          "reply": "I prepared a masked model profile draft.",
+          "draft": {{
+            "kind": "create_model_profile",
+            "title": "Create local profile",
+            "summary": "Adds a local workflow model with the supplied key.",
+            "payload": {{
+              "profile": {{
+                "id": "local-agent",
+                "display_name": "Local Agent",
+                "provider_format": "openai",
+                "base_url": "http://127.0.0.1:7861/antigravity/v1",
+                "model_id": "gemini-3-flash-agent",
+                "api_keys": ["{secret}"],
+                "concurrency_limit": 2
+              }}
+            }}
+          }}
+        }}
+        """,
+    )
+
+    response = router.call("agent.send_message", {"message": "add this model"})
+    draft = response["workspace"]["pending_draft"]
+    assert "<masked>" in json.dumps(draft)
+    assert secret not in json.dumps(draft)
+    assert ModelProfileStore.from_cache_root(tmp_path).get("local-agent") is None
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    stored = ModelProfileStore.from_cache_root(tmp_path).get("local-agent")
+    assert stored is not None
+    assert stored.api_keys == (secret,)
+    assert applied["result"]["profile"]["api_key_status"] == "present"
+    assert secret not in json.dumps(applied["workspace"]["draft_history"])
+    assert secret not in json.dumps(applied["result"])
+
+
+def test_agent_update_model_profile_draft_can_rotate_keys_with_masked_preview(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    secret = "sk-updated-secret-abcdef"
+    fake = FakeAgentClient(
+        f"""
+        {{
+          "reply": "I prepared a key rotation draft.",
+          "draft": {{
+            "kind": "update_model_profile",
+            "title": "Update workflow profile",
+            "summary": "Updates concurrency and rotates the supplied key.",
+            "payload": {{
+              "profile_id": "profile-workflow",
+              "patch": {{
+                "api_keys": ["{secret}"],
+                "concurrency_limit": 5
+              }}
+            }}
+          }}
+        }}
+        """
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    draft = router.call("agent.send_message", {"message": "rotate key"})[
+        "workspace"
+    ]["pending_draft"]
+    assert secret not in json.dumps(draft)
+
+    router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    stored = ModelProfileStore.from_cache_root(tmp_path).get("profile-workflow")
+    assert stored is not None
+    assert stored.api_keys == (secret,)
+    assert stored.concurrency_limit == 5
+
+
+def test_agent_update_prompt_preset_draft_applies_to_custom_prompt(
+    tmp_path: Path,
+) -> None:
+    router, fake = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "Drafting a prompt.",
+          "draft": {
+            "kind": "create_prompt_preset",
+            "title": "Create custom prompt",
+            "summary": "translation prompt",
+            "payload": {
+              "kind": "translation",
+              "name": "Custom",
+              "description": "initial",
+              "system_prompt": "Translate plainly.",
+              "enabled": true
+            }
+          }
+        }
+        """,
+    )
+    draft = router.call("agent.send_message", {"message": "make prompt"})[
+        "workspace"
+    ]["pending_draft"]
+    preset_id = router.call("agent.apply_draft", {"draft_id": draft["id"]})[
+        "result"
+    ]["preset"]["id"]
+    fake.content = f"""
+        {{
+          "reply": "Drafting an update.",
+          "draft": {{
+            "kind": "update_prompt_preset",
+            "title": "Update custom prompt",
+            "summary": "Tightens the prompt.",
+            "payload": {{
+              "id": "{preset_id}",
+              "patch": {{
+                "description": "revised",
+                "system_prompt": "Translate with faithful literary Chinese."
+              }}
+            }}
+          }}
+        }}
+        """
+
+    update_draft = router.call("agent.send_message", {"message": "revise prompt"})[
+        "workspace"
+    ]["pending_draft"]
+    applied = router.call("agent.apply_draft", {"draft_id": update_draft["id"]})
+
+    assert applied["result"]["preset"]["description"] == "revised"
+    assert (
+        applied["result"]["preset"]["system_prompt"]
+        == "Translate with faithful literary Chinese."
+    )
+
+
+def test_agent_recipe_registry_drafts_update_apply_and_delete(
+    tmp_path: Path,
+) -> None:
+    router, fake = _router_with_workflow(tmp_path, '{"reply":"ok","draft":null}')
+    recipe_id = router.call("agent.create_recipe", {"name": "Baseline"})["workspace"][
+        "recipes"
+    ][0]["id"]
+    fake.content = f"""
+        {{
+          "reply": "Drafting a recipe update.",
+          "draft": {{
+            "kind": "update_recipe",
+            "title": "Update recipe",
+            "summary": "Sets the translation model.",
+            "payload": {{
+              "recipe_id": "{recipe_id}",
+              "stage_model_ids": {{"translation": "profile-workflow"}}
+            }}
+          }}
+        }}
+        """
+
+    update_draft = router.call("agent.send_message", {"message": "update recipe"})[
+        "workspace"
+    ]["pending_draft"]
+    updated = router.call("agent.apply_draft", {"draft_id": update_draft["id"]})[
+        "workspace"
+    ]
+    recipe = next(item for item in updated["recipes"] if item["id"] == recipe_id)
+    assert recipe["stage_model_ids"]["translation"] == "profile-workflow"
+
+    fake.content = f"""
+        {{
+          "reply": "Drafting apply.",
+          "draft": {{
+            "kind": "apply_recipe",
+            "title": "Apply recipe",
+            "summary": "Copies the recipe slots.",
+            "payload": {{"recipe_id": "{recipe_id}"}}
+          }}
+        }}
+        """
+    apply_draft = router.call("agent.send_message", {"message": "apply recipe"})[
+        "workspace"
+    ]["pending_draft"]
+    applied = router.call("agent.apply_draft", {"draft_id": apply_draft["id"]})[
+        "workspace"
+    ]
+    assert applied["stage_model_ids"]["translation"] == "profile-workflow"
+
+    fake.content = f"""
+        {{
+          "reply": "Drafting delete.",
+          "draft": {{
+            "kind": "delete_recipe",
+            "title": "Delete recipe",
+            "summary": "Deletes the recipe.",
+            "payload": {{"recipe_id": "{recipe_id}"}}
+          }}
+        }}
+        """
+    delete_draft = router.call("agent.send_message", {"message": "delete recipe"})[
+        "workspace"
+    ]["pending_draft"]
+    deleted = router.call("agent.apply_draft", {"draft_id": delete_draft["id"]})[
+        "workspace"
+    ]
+    assert all(item["id"] != recipe_id for item in deleted["recipes"])
+
+
+def test_agent_memory_registry_drafts_add_and_delete(tmp_path: Path) -> None:
+    router, fake = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "Drafting memory.",
+          "draft": {
+            "kind": "add_memory",
+            "title": "Add memory",
+            "summary": "Adds one preference.",
+            "payload": {"memory": "Keep honorific nuance when possible."}
+          }
+        }
+        """,
+    )
+
+    add_draft = router.call("agent.send_message", {"message": "remember this"})[
+        "workspace"
+    ]["pending_draft"]
+    added = router.call("agent.apply_draft", {"draft_id": add_draft["id"]})[
+        "workspace"
+    ]
+    assert added["memories"] == ["Keep honorific nuance when possible."]
+
+    fake.content = """
+        {
+          "reply": "Drafting delete.",
+          "draft": {
+            "kind": "delete_memory",
+            "title": "Delete memory",
+            "summary": "Removes one preference.",
+            "payload": {"memory": "Keep honorific nuance when possible."}
+          }
+        }
+        """
+    delete_draft = router.call("agent.send_message", {"message": "forget it"})[
+        "workspace"
+    ]["pending_draft"]
+    deleted = router.call("agent.apply_draft", {"draft_id": delete_draft["id"]})[
+        "workspace"
+    ]
+    assert deleted["memories"] == []
 
 
 # --- Draft / patch validation edge cases ------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, replace
 from pathlib import Path
 from secrets import token_hex
 from typing import Callable, Mapping
@@ -35,6 +36,7 @@ from transoria.bridge.router import BridgeRouter
 from transoria.bridge.task_service import TaskService
 from transoria.domain import TaskStatus
 from transoria.llm.client import ChatRequest, LlmClient, LlmRequestError
+from transoria.llm.config import ModelConfig, ProviderFormat, ThinkingLevel
 from transoria.model_profiles import ModelProfileStore
 from transoria.prompts import PromptKind, PromptPreset, PromptPresetStore
 from transoria.runtime.cache import TaskNotFoundError
@@ -54,6 +56,16 @@ _MAX_CONTEXT_MESSAGES = 20
 _MAX_RECIPE_NAME_LENGTH = 120
 _MAX_RECIPE_DESCRIPTION_LENGTH = 400
 _MAX_RECIPES = 50
+
+
+@dataclass(frozen=True)
+class _AgentActionSpec:
+    kind: str
+    mutates: bool
+    requires_confirmation: bool
+    starts_task: bool
+    validate: Callable[..., None]
+    apply: Callable[..., tuple[AgentWorkspaceState, dict[str, object]]]
 
 
 def _build_handlers(
@@ -148,7 +160,10 @@ def _build_handlers(
             task_service=task_service,
         )
         conversation = _require_active(applied_state)
-        conversation = conversation.archive_pending("applied")
+        conversation = conversation.archive_pending(
+            "applied",
+            payload=_sanitize_draft_payload(draft),
+        )
         conversation = conversation.append_message(
             AgentMessage.create("assistant", f"Applied draft: {draft.title}")
         )
@@ -166,7 +181,10 @@ def _build_handlers(
                 f"pending draft {draft_id!r} does not exist.",
                 details={"draft_id": draft_id},
             )
-        conversation = conversation.archive_pending("discarded")
+        conversation = conversation.archive_pending(
+            "discarded",
+            payload=_sanitize_draft_payload(draft),
+        )
         final_state = current.with_active(conversation)
         project_store.save(final_state)
         return respond(final_state)
@@ -471,78 +489,21 @@ def _apply_draft(
     settings_store: SettingsStore,
     task_service: TaskService,
 ) -> tuple[AgentWorkspaceState, dict[str, object]]:
-    _validate_draft(
+    spec = _agent_action_spec(draft.kind)
+    spec.validate(
         draft,
         state=state,
         profile_store=profile_store,
         cache_root=cache_root,
         task_service=task_service,
     )
-    if draft.kind == "update_workspace":
-        next_state = _apply_workspace_patch(
-            state,
-            draft.payload,
-            profile_store=profile_store,
-            cache_root=cache_root,
-        )
-        return next_state, {"kind": draft.kind}
-    if draft.kind == "create_prompt_preset":
-        preset = _create_prompt_preset(draft.payload, cache_root=cache_root)
-        return state, {
-            "kind": draft.kind,
-            "preset": _prompt_body(preset),
-        }
-    if draft.kind == "update_memory":
-        memories = _coerce_memories_payload(draft.payload)
-        next_state = state.with_memories(memories)
-        return next_state, {"kind": draft.kind, "memory_count": len(memories)}
-    if draft.kind == "create_recipe":
-        name, description, stage_models, stage_prompts = _coerce_recipe_payload(
-            draft.payload,
-            profile_store=profile_store,
-            cache_root=cache_root,
-        )
-        recipe = AgentRecipe.create(
-            name=name,
-            description=description,
-            stage_model_ids=stage_models,
-            stage_prompt_ids=stage_prompts,
-        )
-        return state.add_recipe(recipe), {
-            "kind": draft.kind,
-            "recipe": recipe.to_dict(),
-        }
-    if draft.kind in START_DRAFT_KINDS:
-        _raise_if_active_task_locked(state)
-        conversation = _require_active(state)
-        result = start_agent_task(
-            draft_kind=draft.kind,
-            payload=draft.payload,
-            state=state,
-            task_service=task_service,
-            settings_store=settings_store,
-            profile_store=profile_store,
-            cache_root=cache_root,
-            request_id=draft.id,
-        )
-        task_id = str(result.get("task_id") or "")
-        task_kind = TASK_KIND_BY_DRAFT_KIND[draft.kind]
-        started_at = str(result.get("started_at") or "")
-        active_task = AgentActiveTask.create(
-            task_id=task_id,
-            kind=task_kind,  # type: ignore[arg-type]
-            conversation_id=conversation.id,
-            started_at=started_at,
-        )
-        return state.with_active_task(active_task), {
-            "kind": draft.kind,
-            "task": active_task.to_dict(),
-            "start_result": dict(result),
-        }
-    # Unreachable: _validate_draft above rejects unsupported kinds first.
-    raise BridgeError.invalid_argument(  # pragma: no cover
-        f"unsupported draft kind: {draft.kind!r}",
-        details={"kind": draft.kind},
+    return spec.apply(
+        draft,
+        state=state,
+        profile_store=profile_store,
+        cache_root=cache_root,
+        settings_store=settings_store,
+        task_service=task_service,
     )
 
 
@@ -554,45 +515,560 @@ def _validate_draft(
     cache_root: Path,
     task_service: TaskService,
 ) -> None:
-    if draft.kind == "update_workspace":
-        _apply_workspace_patch(
-            AgentWorkspaceState.empty(),
-            draft.payload,
-            profile_store=profile_store,
-            cache_root=cache_root,
-        )
-        return
-    if draft.kind == "create_prompt_preset":
-        _coerce_prompt_preset_payload(draft.payload)
-        return
-    if draft.kind == "update_memory":
-        _coerce_memories_payload(draft.payload)
-        return
-    if draft.kind == "create_recipe":
-        _coerce_recipe_payload(
-            draft.payload,
-            profile_store=profile_store,
-            cache_root=cache_root,
-        )
-        return
-    if draft.kind in START_DRAFT_KINDS:
-        _raise_if_active_task_locked(state)
-        completeness = assess_start_draft(
-            draft_kind=draft.kind,
-            state=state,
-            payload=draft.payload,
-        )
-        if not completeness.complete:
-            raise BridgeError.invalid_argument(
-                "task-start draft is incomplete.",
-                details=completeness.to_dict(),
-            )
-        _validate_glossary_task_reference(draft, task_service=task_service)
-        return
-    raise BridgeError.invalid_argument(
-        f"unsupported draft kind: {draft.kind!r}",
-        details={"kind": draft.kind},
+    spec = _agent_action_spec(draft.kind)
+    spec.validate(
+        draft,
+        state=state,
+        profile_store=profile_store,
+        cache_root=cache_root,
+        task_service=task_service,
     )
+
+
+def _agent_action_spec(kind: str) -> _AgentActionSpec:
+    specs = _agent_action_specs()
+    spec = specs.get(kind)
+    if spec is None:
+        raise BridgeError.invalid_argument(
+            f"unsupported draft kind: {kind!r}",
+            details={"kind": kind},
+        )
+    if spec.mutates and not spec.requires_confirmation:  # pragma: no cover
+        raise BridgeError.invalid_argument(
+            f"mutating action must require confirmation: {kind!r}",
+            details={"kind": kind},
+        )
+    return spec
+
+
+def _agent_action_specs() -> dict[str, _AgentActionSpec]:
+    specs = {
+        "update_workspace": _AgentActionSpec(
+            kind="update_workspace",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_workspace_action,
+            apply=_apply_workspace_action,
+        ),
+        "create_prompt_preset": _AgentActionSpec(
+            kind="create_prompt_preset",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_create_prompt_action,
+            apply=_apply_create_prompt_action,
+        ),
+        "update_prompt_preset": _AgentActionSpec(
+            kind="update_prompt_preset",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_update_prompt_action,
+            apply=_apply_update_prompt_action,
+        ),
+        "update_memory": _AgentActionSpec(
+            kind="update_memory",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_update_memory_action,
+            apply=_apply_update_memory_action,
+        ),
+        "add_memory": _AgentActionSpec(
+            kind="add_memory",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_add_memory_action,
+            apply=_apply_add_memory_action,
+        ),
+        "delete_memory": _AgentActionSpec(
+            kind="delete_memory",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_delete_memory_action,
+            apply=_apply_delete_memory_action,
+        ),
+        "create_recipe": _AgentActionSpec(
+            kind="create_recipe",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_create_recipe_action,
+            apply=_apply_create_recipe_action,
+        ),
+        "update_recipe": _AgentActionSpec(
+            kind="update_recipe",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_update_recipe_action,
+            apply=_apply_update_recipe_action,
+        ),
+        "apply_recipe": _AgentActionSpec(
+            kind="apply_recipe",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_apply_recipe_action,
+            apply=_apply_apply_recipe_action,
+        ),
+        "delete_recipe": _AgentActionSpec(
+            kind="delete_recipe",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_delete_recipe_action,
+            apply=_apply_delete_recipe_action,
+        ),
+        "create_model_profile": _AgentActionSpec(
+            kind="create_model_profile",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_create_model_profile_action,
+            apply=_apply_create_model_profile_action,
+        ),
+        "update_model_profile": _AgentActionSpec(
+            kind="update_model_profile",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_update_model_profile_action,
+            apply=_apply_update_model_profile_action,
+        ),
+    }
+    for kind in START_DRAFT_KINDS:
+        specs[kind] = _AgentActionSpec(
+            kind=kind,
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=True,
+            validate=_validate_start_task_action,
+            apply=_apply_start_task_action,
+        )
+    return specs
+
+
+def _validate_workspace_action(
+    draft: AgentActionDraft,
+    *,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    **_: object,
+) -> None:
+    _apply_workspace_patch(
+        AgentWorkspaceState.empty(),
+        draft.payload,
+        profile_store=profile_store,
+        cache_root=cache_root,
+    )
+
+
+def _apply_workspace_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    next_state = _apply_workspace_patch(
+        state,
+        draft.payload,
+        profile_store=profile_store,
+        cache_root=cache_root,
+    )
+    return next_state, {"kind": draft.kind}
+
+
+def _validate_create_prompt_action(draft: AgentActionDraft, **_: object) -> None:
+    _coerce_prompt_preset_payload(draft.payload)
+
+
+def _apply_create_prompt_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    cache_root: Path,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    preset = _create_prompt_preset(draft.payload, cache_root=cache_root)
+    return state, {"kind": draft.kind, "preset": _prompt_body(preset)}
+
+
+def _validate_update_prompt_action(
+    draft: AgentActionDraft,
+    *,
+    cache_root: Path,
+    **_: object,
+) -> None:
+    preset_id, patch = _coerce_prompt_update_payload(draft.payload)
+    _resolve_prompt_for_update(preset_id, patch, cache_root=cache_root)
+
+
+def _apply_update_prompt_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    cache_root: Path,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    preset = _update_prompt_preset(draft.payload, cache_root=cache_root)
+    return state, {"kind": draft.kind, "preset": _prompt_body(preset)}
+
+
+def _validate_update_memory_action(draft: AgentActionDraft, **_: object) -> None:
+    _coerce_memories_payload(draft.payload)
+
+
+def _apply_update_memory_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    memories = _coerce_memories_payload(draft.payload)
+    return state.with_memories(memories), {
+        "kind": draft.kind,
+        "memory_count": len(memories),
+    }
+
+
+def _validate_add_memory_action(draft: AgentActionDraft, **_: object) -> None:
+    _coerce_memory_items_payload(draft.payload)
+
+
+def _apply_add_memory_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    additions = _coerce_memory_items_payload(draft.payload)
+    memories = list(state.memories)
+    for memory in additions:
+        if memory not in memories:
+            memories.append(memory)
+    next_state = state.with_memories(tuple(memories))
+    return next_state, {"kind": draft.kind, "memory_count": len(next_state.memories)}
+
+
+def _validate_delete_memory_action(draft: AgentActionDraft, **_: object) -> None:
+    _coerce_memory_items_payload(draft.payload)
+
+
+def _apply_delete_memory_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    removals = set(_coerce_memory_items_payload(draft.payload))
+    next_state = state.with_memories(
+        tuple(item for item in state.memories if item not in removals)
+    )
+    return next_state, {"kind": draft.kind, "memory_count": len(next_state.memories)}
+
+
+def _validate_create_recipe_action(
+    draft: AgentActionDraft,
+    *,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    **_: object,
+) -> None:
+    _coerce_recipe_payload(
+        draft.payload,
+        profile_store=profile_store,
+        cache_root=cache_root,
+    )
+
+
+def _apply_create_recipe_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    if len(state.recipes) >= _MAX_RECIPES:
+        raise BridgeError.invalid_argument(
+            "too many recipes.",
+            field="recipes",
+            details={"max_count": _MAX_RECIPES},
+        )
+    name, description, stage_models, stage_prompts = _coerce_recipe_payload(
+        draft.payload,
+        profile_store=profile_store,
+        cache_root=cache_root,
+    )
+    recipe = AgentRecipe.create(
+        name=name,
+        description=description,
+        stage_model_ids=stage_models,
+        stage_prompt_ids=stage_prompts,
+    )
+    return state.add_recipe(recipe), {"kind": draft.kind, "recipe": recipe.to_dict()}
+
+
+def _validate_update_recipe_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    **_: object,
+) -> None:
+    recipe_id, _, _, _ = _coerce_recipe_update_payload(
+        draft.payload,
+        profile_store=profile_store,
+        cache_root=cache_root,
+    )
+    if state.get_recipe(recipe_id) is None:
+        raise BridgeError.not_found(
+            f"recipe {recipe_id!r} does not exist.",
+            details={"recipe_id": recipe_id},
+        )
+
+
+def _apply_update_recipe_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    recipe_id, fields, stage_models, stage_prompts = _coerce_recipe_update_payload(
+        draft.payload,
+        profile_store=profile_store,
+        cache_root=cache_root,
+    )
+    recipe = state.get_recipe(recipe_id)
+    if recipe is None:
+        raise BridgeError.not_found(
+            f"recipe {recipe_id!r} does not exist.",
+            details={"recipe_id": recipe_id},
+        )
+    updated = recipe.with_updates(
+        name=fields.get("name"),
+        description=fields.get("description"),
+        stage_model_ids=stage_models,
+        stage_prompt_ids=stage_prompts,
+    )
+    return state.replace_recipe(updated), {
+        "kind": draft.kind,
+        "recipe": updated.to_dict(),
+    }
+
+
+def _validate_apply_recipe_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    **_: object,
+) -> None:
+    recipe = _require_recipe_from_payload(draft.payload, state=state)
+    _apply_workspace_patch(
+        state,
+        {
+            "stage_model_ids": dict(recipe.stage_model_ids),
+            "stage_prompt_ids": dict(recipe.stage_prompt_ids),
+        },
+        profile_store=profile_store,
+        cache_root=cache_root,
+    )
+
+
+def _apply_apply_recipe_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    recipe = _require_recipe_from_payload(draft.payload, state=state)
+    next_state = _apply_workspace_patch(
+        state,
+        {
+            "stage_model_ids": dict(recipe.stage_model_ids),
+            "stage_prompt_ids": dict(recipe.stage_prompt_ids),
+        },
+        profile_store=profile_store,
+        cache_root=cache_root,
+    )
+    return next_state, {"kind": draft.kind, "recipe": recipe.to_dict()}
+
+
+def _validate_delete_recipe_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    **_: object,
+) -> None:
+    _require_recipe_from_payload(draft.payload, state=state)
+
+
+def _apply_delete_recipe_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    recipe = _require_recipe_from_payload(draft.payload, state=state)
+    return state.remove_recipe(recipe.id), {
+        "kind": draft.kind,
+        "recipe_id": recipe.id,
+    }
+
+
+def _validate_create_model_profile_action(
+    draft: AgentActionDraft,
+    *,
+    profile_store: ModelProfileStore,
+    **_: object,
+) -> None:
+    profile = _model_profile_from_draft_payload(draft.payload)
+    if profile_store.get(profile.id) is not None:
+        raise BridgeError.conflict(f"profile id already exists: {profile.id!r}")
+
+
+def _apply_create_model_profile_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    profile = _model_profile_from_draft_payload(draft.payload)
+    try:
+        stored = profile_store.create(profile)
+    except ValueError as exc:
+        raise BridgeError.conflict(str(exc)) from exc
+    return state, {
+        "kind": draft.kind,
+        "profile": _model_profile_body(stored, profile_store=profile_store),
+    }
+
+
+def _validate_update_model_profile_action(
+    draft: AgentActionDraft,
+    *,
+    profile_store: ModelProfileStore,
+    **_: object,
+) -> None:
+    profile_id, patch, api_keys = _coerce_model_profile_update_payload(draft.payload)
+    if profile_store.get(profile_id) is None:
+        raise BridgeError.not_found(
+            f"profile {profile_id!r} does not exist.",
+            details={"id": profile_id},
+        )
+    if patch:
+        _coerce_model_profile_patch(patch)
+    if api_keys is not None:
+        _coerce_api_keys(api_keys)
+
+
+def _apply_update_model_profile_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    profile_id, patch, api_keys = _coerce_model_profile_update_payload(draft.payload)
+    stored = profile_store.get(profile_id)
+    if stored is None:
+        raise BridgeError.not_found(
+            f"profile {profile_id!r} does not exist.",
+            details={"id": profile_id},
+        )
+    if patch:
+        try:
+            stored = profile_store.update(
+                profile_id,
+                _coerce_model_profile_patch(patch),
+            )
+        except ValueError as exc:
+            raise BridgeError.invalid_argument(str(exc)) from exc
+    if api_keys is not None:
+        try:
+            stored = profile_store.set_api_keys(profile_id, _coerce_api_keys(api_keys))
+        except KeyError as exc:
+            raise BridgeError.not_found(
+                f"profile {profile_id!r} does not exist.",
+                details={"id": profile_id},
+            ) from exc
+    return state, {
+        "kind": draft.kind,
+        "profile": _model_profile_body(stored, profile_store=profile_store),
+    }
+
+
+def _validate_start_task_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    task_service: TaskService,
+    **_: object,
+) -> None:
+    _raise_if_active_task_locked(state)
+    completeness = assess_start_draft(
+        draft_kind=draft.kind,
+        state=state,
+        payload=draft.payload,
+    )
+    if not completeness.complete:
+        raise BridgeError.invalid_argument(
+            "task-start draft is incomplete.",
+            details=completeness.to_dict(),
+        )
+    _validate_glossary_task_reference(draft, task_service=task_service)
+
+
+def _apply_start_task_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    settings_store: SettingsStore,
+    task_service: TaskService,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    _raise_if_active_task_locked(state)
+    conversation = _require_active(state)
+    result = start_agent_task(
+        draft_kind=draft.kind,
+        payload=draft.payload,
+        state=state,
+        task_service=task_service,
+        settings_store=settings_store,
+        profile_store=profile_store,
+        cache_root=cache_root,
+        request_id=draft.id,
+    )
+    task_id = str(result.get("task_id") or "")
+    task_kind = TASK_KIND_BY_DRAFT_KIND[draft.kind]
+    started_at = str(result.get("started_at") or "")
+    active_task = AgentActiveTask.create(
+        task_id=task_id,
+        kind=task_kind,  # type: ignore[arg-type]
+        conversation_id=conversation.id,
+        started_at=started_at,
+    )
+    return state.with_active_task(active_task), {
+        "kind": draft.kind,
+        "task": active_task.to_dict(),
+        "start_result": dict(result),
+    }
 
 
 def _load_with_reconciled_active_task(
@@ -681,6 +1157,97 @@ def _create_prompt_preset(
     return preset
 
 
+def _update_prompt_preset(
+    payload: Mapping[str, object],
+    *,
+    cache_root: Path,
+) -> PromptPreset:
+    preset_id, patch = _coerce_prompt_update_payload(payload)
+    kind, presets, index = _resolve_prompt_for_update(
+        preset_id,
+        patch,
+        cache_root=cache_root,
+    )
+    updated = replace(presets[index], **patch)
+    presets[index] = updated
+    _prompt_store_for(cache_root, kind).save(presets)
+    return updated
+
+
+def _coerce_prompt_update_payload(
+    payload: Mapping[str, object],
+) -> tuple[str, dict[str, object]]:
+    preset_id = str(payload.get("id") or payload.get("preset_id") or "").strip()
+    if not preset_id:
+        raise BridgeError.invalid_argument("id is required.", field="id")
+    raw_patch = payload.get("patch")
+    if raw_patch is None:
+        raw_patch = {
+            key: payload[key]
+            for key in ("name", "system_prompt", "description", "enabled")
+            if key in payload
+        }
+    if not isinstance(raw_patch, Mapping):
+        raise BridgeError.invalid_argument(
+            "patch object is required.",
+            field="patch",
+        )
+    patch = _coerce_prompt_patch(raw_patch)
+    if not patch:
+        raise BridgeError.invalid_argument(
+            "patch must include at least one editable field.",
+            field="patch",
+        )
+    return preset_id, patch
+
+
+def _coerce_prompt_patch(patch: Mapping[str, object]) -> dict[str, object]:
+    valid = {"name", "system_prompt", "description", "enabled"}
+    coerced: dict[str, object] = {}
+    for key, value in patch.items():
+        if key not in valid:
+            raise BridgeError.invalid_argument(
+                f"field {key!r} cannot be updated.",
+                field=key,
+            )
+        if key == "enabled":
+            if not isinstance(value, bool):
+                raise BridgeError.invalid_argument(
+                    "enabled must be a boolean.",
+                    field=key,
+                )
+            coerced[key] = value
+            continue
+        if not isinstance(value, str):
+            raise BridgeError.invalid_argument(f"{key} must be a string.", field=key)
+        text = value.strip() if key in {"name", "system_prompt"} else value
+        if key in {"name", "system_prompt"} and not text:
+            raise BridgeError.invalid_argument(f"{key} must not be empty.", field=key)
+        coerced[key] = text
+    return coerced
+
+
+def _resolve_prompt_for_update(
+    preset_id: str,
+    patch: Mapping[str, object],
+    *,
+    cache_root: Path,
+) -> tuple[PromptKind, list[PromptPreset], int]:
+    for kind in PromptKind:
+        store = _prompt_store_for(cache_root, kind)
+        presets = list(store.load())
+        for index, preset in enumerate(presets):
+            if preset.id != preset_id:
+                continue
+            if preset.is_system:
+                raise BridgeError.invalid_argument(
+                    "system prompt presets are read-only; duplicate to edit.",
+                    details={"reason": "is_system"},
+                )
+            return kind, presets, index
+    raise BridgeError.not_found(f"prompt preset {preset_id!r} does not exist.")
+
+
 def _coerce_prompt_preset_payload(
     payload: Mapping[str, object],
 ) -> tuple[PromptKind, str, str, str, bool]:
@@ -708,6 +1275,82 @@ def _coerce_prompt_preset_payload(
         system_prompt,
         bool(payload.get("enabled", True)),
     )
+
+
+def _coerce_recipe_update_payload(
+    payload: Mapping[str, object],
+    *,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+) -> tuple[
+    str,
+    dict[str, str],
+    dict[str, str | None] | None,
+    dict[str, str | None] | None,
+]:
+    recipe_id = str(payload.get("recipe_id") or payload.get("id") or "").strip()
+    if not recipe_id:
+        raise BridgeError.invalid_argument(
+            "recipe_id is required.",
+            field="recipe_id",
+        )
+    fields: dict[str, str] = {}
+    if "name" in payload:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise BridgeError.invalid_argument("name is required.", field="name")
+        if len(name) > _MAX_RECIPE_NAME_LENGTH:
+            raise BridgeError.invalid_argument(
+                "name is too long.",
+                field="name",
+                details={"max_length": _MAX_RECIPE_NAME_LENGTH},
+            )
+        fields["name"] = name
+    if "description" in payload:
+        description = str(payload.get("description") or "").strip()
+        if len(description) > _MAX_RECIPE_DESCRIPTION_LENGTH:
+            raise BridgeError.invalid_argument(
+                "description is too long.",
+                field="description",
+                details={"max_length": _MAX_RECIPE_DESCRIPTION_LENGTH},
+            )
+        fields["description"] = description
+    stage_models = (
+        _coerce_model_slots(payload.get("stage_model_ids"), profile_store=profile_store)
+        if "stage_model_ids" in payload
+        else None
+    )
+    stage_prompts = (
+        _coerce_prompt_slots(payload.get("stage_prompt_ids"), cache_root=cache_root)
+        if "stage_prompt_ids" in payload
+        else None
+    )
+    if not fields and stage_models is None and stage_prompts is None:
+        raise BridgeError.invalid_argument(
+            "recipe update must include at least one field.",
+            field="recipe_id",
+        )
+    return recipe_id, fields, stage_models, stage_prompts
+
+
+def _require_recipe_from_payload(
+    payload: Mapping[str, object],
+    *,
+    state: AgentWorkspaceState,
+) -> AgentRecipe:
+    recipe_id = str(payload.get("recipe_id") or payload.get("id") or "").strip()
+    if not recipe_id:
+        raise BridgeError.invalid_argument(
+            "recipe_id is required.",
+            field="recipe_id",
+        )
+    recipe = state.get_recipe(recipe_id)
+    if recipe is None:
+        raise BridgeError.not_found(
+            f"recipe {recipe_id!r} does not exist.",
+            details={"recipe_id": recipe_id},
+        )
+    return recipe
 
 
 def _coerce_recipe_payload(
@@ -745,6 +1388,15 @@ def _coerce_recipe_payload(
     return name, description, stage_models, stage_prompts
 
 
+def _coerce_memory_items_payload(payload: Mapping[str, object]) -> tuple[str, ...]:
+    if "memories" in payload:
+        return _coerce_memories_payload(payload)
+    memory = str(payload.get("memory") or "").strip()
+    if not memory:
+        raise BridgeError.invalid_argument("memory is required.", field="memory")
+    return _coerce_memories_payload({"memories": [memory]})
+
+
 def _coerce_memories_payload(payload: Mapping[str, object]) -> tuple[str, ...]:
     memories_raw = payload.get("memories")
     if not isinstance(memories_raw, list):
@@ -779,6 +1431,118 @@ def _coerce_memories_payload(payload: Mapping[str, object]) -> tuple[str, ...]:
             details={"max_count": 30},
         )
     return tuple(memories)
+
+
+def _model_profile_from_draft_payload(payload: Mapping[str, object]) -> ModelConfig:
+    raw_profile = payload.get("profile")
+    body = dict(raw_profile) if isinstance(raw_profile, Mapping) else dict(payload)
+    body.setdefault("id", _generate_model_profile_id(body))
+    api_keys = body.pop("api_keys", ())
+    try:
+        profile = ModelConfig.from_dict(body)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise BridgeError.invalid_argument(str(exc)) from exc
+    return profile.with_api_keys(_coerce_api_keys(api_keys))
+
+
+def _coerce_model_profile_update_payload(
+    payload: Mapping[str, object],
+) -> tuple[str, dict[str, object], object | None]:
+    profile_id = str(payload.get("profile_id") or payload.get("id") or "").strip()
+    if not profile_id:
+        raise BridgeError.invalid_argument("profile_id is required.", field="profile_id")
+    raw_patch = payload.get("patch")
+    if raw_patch is None:
+        raw_patch = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"profile_id", "id"}
+        }
+    if not isinstance(raw_patch, Mapping):
+        raise BridgeError.invalid_argument(
+            "patch object is required.",
+            field="patch",
+        )
+    patch = dict(raw_patch)
+    api_keys = patch.pop("api_keys", None)
+    if not patch and api_keys is None:
+        raise BridgeError.invalid_argument(
+            "profile update must include at least one field.",
+            field="patch",
+        )
+    return profile_id, patch, api_keys
+
+
+def _coerce_model_profile_patch(patch: Mapping[str, object]) -> dict[str, object]:
+    valid_fields = set(ModelConfig.__dataclass_fields__)  # type: ignore[attr-defined]
+    unknown = set(patch) - valid_fields
+    if unknown:
+        raise BridgeError.invalid_argument(
+            f"unknown profile field(s): {sorted(unknown)!r}",
+            details={"unknown_fields": sorted(unknown)},
+        )
+    coerced: dict[str, object] = {}
+    for key, value in patch.items():
+        if key == "provider_format" and isinstance(value, str):
+            try:
+                coerced[key] = ProviderFormat(value)
+            except ValueError as exc:
+                raise BridgeError.invalid_argument(str(exc), field=key) from exc
+        elif key == "thinking_level" and isinstance(value, str):
+            try:
+                coerced[key] = ThinkingLevel(value)
+            except ValueError as exc:
+                raise BridgeError.invalid_argument(str(exc), field=key) from exc
+        elif key == "custom_headers" and isinstance(value, list):
+            coerced[key] = tuple(
+                (str(pair[0]), str(pair[1]))
+                for pair in value
+                if isinstance(pair, (list, tuple)) and len(pair) == 2
+            )
+        else:
+            coerced[key] = value
+    return coerced
+
+
+def _coerce_api_keys(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise BridgeError.invalid_argument(
+            "api_keys must be a list of strings.",
+            field="api_keys",
+        )
+    keys: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            raise BridgeError.invalid_argument(
+                "api_keys must be a list of strings.",
+                field="api_keys",
+            )
+        key = raw.strip()
+        if key:
+            keys.append(key)
+    return tuple(keys)
+
+
+def _model_profile_body(
+    profile: ModelConfig,
+    *,
+    profile_store: ModelProfileStore,
+) -> dict[str, object]:
+    body = profile.to_dict()
+    body.pop("api_keys", None)
+    body["api_key_configured"] = bool(profile.api_keys)
+    body["api_key_status"] = profile_store.api_key_status(profile.id)
+    return body
+
+
+def _generate_model_profile_id(body: Mapping[str, object]) -> str:
+    seed = str(body.get("display_name") or body.get("model_id") or "profile")
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in seed).strip("-")
+    if not slug:
+        slug = "profile"
+    return f"{slug}-{token_hex(3)}"
 
 
 def _coerce_model_slots(
@@ -899,13 +1663,70 @@ def _workspace_wire(state: AgentWorkspaceState) -> dict[str, object]:
         "messages": [message.to_dict() for message in active.messages]
         if active
         else [],
-        "pending_draft": active.pending_draft.to_dict()
+        "pending_draft": _draft_wire(active.pending_draft)
         if active and active.pending_draft
         else None,
-        "draft_history": [draft.to_dict() for draft in active.draft_history]
+        "draft_history": [_draft_wire(draft) for draft in active.draft_history]
         if active
         else [],
         "updated_at": state.updated_at,
+    }
+
+
+def _draft_wire(draft: AgentActionDraft) -> dict[str, object]:
+    return {**draft.to_dict(), "payload": _sanitize_draft_payload(draft)}
+
+
+def _sanitize_draft_payload(draft: AgentActionDraft) -> dict[str, object]:
+    return _sanitize_preview_value(draft.payload)  # type: ignore[return-value]
+
+
+def _sanitize_preview_value(value: object, *, key: str | None = None) -> object:
+    if _is_sensitive_key(key):
+        if isinstance(value, list):
+            return ["<masked>" for item in value if item not in (None, "")]
+        if value in (None, ""):
+            return value
+        return "<masked>"
+    if isinstance(value, Mapping):
+        sanitized: dict[str, object] = {}
+        for child_key, child_value in value.items():
+            child_key_str = str(child_key)
+            if child_key_str == "custom_headers" and isinstance(child_value, list):
+                sanitized[child_key_str] = _sanitize_custom_headers(child_value)
+            else:
+                sanitized[child_key_str] = _sanitize_preview_value(
+                    child_value,
+                    key=child_key_str,
+                )
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_preview_value(item) for item in value]
+    return value
+
+
+def _sanitize_custom_headers(value: list[object]) -> list[object]:
+    sanitized: list[object] = []
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            sanitized.append(item)
+            continue
+        name = str(item[0])
+        header_value = "<masked>" if _is_sensitive_key(name) else item[1]
+        sanitized.append([name, header_value])
+    return sanitized
+
+
+def _is_sensitive_key(key: str | None) -> bool:
+    if key is None:
+        return False
+    normalized = key.lower().replace("-", "_")
+    return normalized in {
+        "api_key",
+        "api_keys",
+        "authorization",
+        "x_api_key",
+        "proxy_authorization",
     }
 
 

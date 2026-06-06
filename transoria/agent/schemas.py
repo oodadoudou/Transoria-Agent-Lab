@@ -211,10 +211,18 @@ class AgentConversation:
     ) -> "AgentConversation":
         return replace(self, pending_draft=draft, updated_at=now_iso())
 
-    def archive_pending(self, status: DraftStatus) -> "AgentConversation":
+    def archive_pending(
+        self,
+        status: DraftStatus,
+        *,
+        payload: Mapping[str, object] | None = None,
+    ) -> "AgentConversation":
         if self.pending_draft is None:
             return self
-        archived = self.pending_draft.with_status(status)
+        pending = self.pending_draft
+        if payload is not None:
+            pending = replace(pending, payload=dict(payload))
+        archived = pending.with_status(status)
         return replace(
             self,
             pending_draft=None,
