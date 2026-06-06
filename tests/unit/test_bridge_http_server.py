@@ -102,7 +102,7 @@ def test_api_methods_lists_methods(http_server: str):
     with urllib.request.urlopen(f"{http_server}/api/_methods", timeout=5) as response:
         payload = json.loads(response.read().decode("utf-8"))
     methods = payload["methods"]
-    assert len(methods) == 147
+    assert len(methods) == 143
     for method in (
         "app.get_metadata",
         "translation.start_task",
@@ -112,10 +112,6 @@ def test_api_methods_lists_methods(http_server: str):
         "glossary_review.read_final",
         "glossary_review.delete_final_rows",
         "glossary_review.restore_deleted_report_row",
-        "agent.create_project",
-        "agent.read_project",
-        "agent.scan_project",
-        "agent.approve_project_plan",
         "replacement.import_rules",
         "epub_compress.preview",
         "epub_compress.read_report",

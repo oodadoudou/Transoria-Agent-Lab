@@ -118,89 +118,10 @@ export interface AgentWorkspace {
   recipes: AgentRecipe[];
   active_conversation_id: string | null;
   conversations: AgentConversationSummary[];
-  projects: AgentProjectSummary[];
-  active_project_id: string | null;
   messages: AgentMessage[];
   pending_draft: AgentActionDraft | null;
   draft_history: AgentActionDraft[];
   updated_at: string;
-}
-
-export type AgentProjectStatus = "draft" | "scanned" | "plan_approved";
-
-export interface AgentProjectSummary {
-  id: string;
-  name: string;
-  input_dir: string;
-  status: AgentProjectStatus;
-  updated_at: string;
-}
-
-export interface AgentProjectDocument {
-  relative_path: string;
-  format: "epub" | "txt";
-  size_bytes: number;
-}
-
-export interface AgentProjectScan {
-  scanned_at: string;
-  input_dir: string;
-  documents: AgentProjectDocument[];
-  document_count: number;
-  total_bytes: number;
-  epub_count: number;
-  txt_count: number;
-  truncated: boolean;
-}
-
-export interface AgentProjectTaskLinks {
-  glossary_task_id: string | null;
-  glossary_review_task_id: string | null;
-  translation_task_id: string | null;
-}
-
-export interface AgentProjectCheckpoint {
-  id: string;
-  stage: "project_plan";
-  status: "approved";
-  notes: string;
-  decided_at: string;
-}
-
-export interface AgentProjectPlan {
-  stages: string[];
-  recipe_snapshot: AgentRecipe | null;
-  auto_chain: boolean;
-  notes: string;
-  proposed_at: string;
-}
-
-export interface AgentProject {
-  id: string;
-  name: string;
-  input_dir: string;
-  source_language: Language | null;
-  target_language: Language | null;
-  status: AgentProjectStatus;
-  scan: AgentProjectScan | null;
-  plan: AgentProjectPlan | null;
-  task_links: AgentProjectTaskLinks;
-  checkpoints: AgentProjectCheckpoint[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface AgentProjectPlanInput {
-  stages?: string[];
-  recipe_id?: string | null;
-  auto_chain?: boolean;
-  notes?: string;
-}
-
-export interface AgentProjectTaskLinksInput {
-  glossary_task_id?: string | null;
-  glossary_review_task_id?: string | null;
-  translation_task_id?: string | null;
 }
 
 export interface AgentInventoryProfile {
@@ -235,10 +156,6 @@ export interface AgentWorkspaceResponse {
   workspace: AgentWorkspace;
   inventory: AgentInventory;
   result?: Record<string, unknown>;
-}
-
-export interface AgentProjectResponse extends AgentWorkspaceResponse {
-  project: AgentProject;
 }
 
 export interface AppMetadata {

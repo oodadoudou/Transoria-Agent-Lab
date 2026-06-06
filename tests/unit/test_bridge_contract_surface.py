@@ -50,10 +50,6 @@ EXPECTED_METHODS: tuple[str, ...] = (
     "agent.update_recipe",
     "agent.delete_recipe",
     "agent.apply_recipe",
-    "agent.create_project",
-    "agent.read_project",
-    "agent.scan_project",
-    "agent.approve_project_plan",
     # dialogs
     "dialogs.choose_input_directory",
     "dialogs.choose_output_directory",
@@ -233,9 +229,7 @@ def test_backend_registers_full_contract(router):
     # 11 removed before 1.1.0 release (file organizer pulled from scope).
     # 6 added 2026-06-06 (agent conversation list + direct memory management).
     # 4 added 2026-06-06 (agent recipe create/update/delete/apply).
-    # 4 added 2026-06-06 (agent project scaffolding:
-    #   create_project / read_project / scan_project / approve_project_plan).
-    assert len(actual) == 147
+    assert len(actual) == 143
 # Test 2 — frontend bridge wraps every backend method
 
 
@@ -285,13 +279,6 @@ MIN_PAYLOADS: dict[str, dict[str, object]] = {
     "agent.update_recipe": {"recipe_id": "missing", "name": "x"},
     "agent.delete_recipe": {"recipe_id": "missing"},
     "agent.apply_recipe": {"recipe_id": "missing"},
-    "agent.create_project": {
-        "name": "smoke",
-        "input_dir": "/nonexistent-agent-project-input",
-    },
-    "agent.read_project": {"project_id": "missing"},
-    "agent.scan_project": {"project_id": "missing"},
-    "agent.approve_project_plan": {"project_id": "missing", "plan": {}},
     "dialogs.choose_input_directory": {},
     "dialogs.choose_output_directory": {},
     "dialogs.choose_glossary_file": {},

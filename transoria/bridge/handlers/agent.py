@@ -12,36 +12,22 @@ from transoria.agent.configuration_agent import (
     build_user_prompt,
     parse_agent_response,
 )
-from transoria.agent.project_store import (
-    AgentProjectStore,
-    ProjectNotFoundError,
-    ProjectRecordStore,
-)
+from transoria.agent.project_store import AgentProjectStore
 from transoria.agent.schemas import (
     MODEL_SLOTS,
-    PROJECT_TASK_SLOTS,
     PROMPT_SLOTS,
     AgentActionDraft,
     AgentConversation,
     AgentMessage,
-    AgentProject,
     AgentRecipe,
     AgentWorkspaceState,
-    ProjectCheckpoint,
-    ProjectDocument,
-    ProjectPlan,
-    ProjectScan,
-    ProjectTaskLinks,
 )
 from transoria.bridge.errors import BridgeError
 from transoria.bridge.handlers._utils import expect_string
 from transoria.bridge.router import BridgeRouter
-from transoria.domain import Language, TaskKind
-from transoria.formats.scanner import scan_input_directory
 from transoria.llm.client import ChatRequest, LlmClient, LlmRequestError
 from transoria.model_profiles import ModelProfileStore
 from transoria.prompts import PromptKind, PromptPreset, PromptPresetStore
-from transoria.runtime.cache import TaskCache, TaskNotFoundError
 
 LlmClientFactory = Callable[[], LlmClient]
 
@@ -57,39 +43,16 @@ _MAX_RECIPE_NAME_LENGTH = 120
 _MAX_RECIPE_DESCRIPTION_LENGTH = 400
 _MAX_RECIPES = 50
 
-_MAX_PROJECT_NAME_LENGTH = 200
-_MAX_PROJECT_NOTES_LENGTH = 2000
-_MAX_SCAN_DOCUMENTS = 1000
-
-_TASK_KIND_BY_SLOT: dict[str, TaskKind] = {
-    "glossary": TaskKind.GLOSSARY,
-    "glossary_review": TaskKind.GLOSSARY_REVIEW,
-    "translation": TaskKind.TRANSLATION,
-}
-
-_TASK_LINK_FIELDS: dict[str, str] = {
-    "glossary": "glossary_task_id",
-    "glossary_review": "glossary_review_task_id",
-    "translation": "translation_task_id",
-}
-
 
 def _build_handlers(
     *,
     cache_root: Path,
     project_store: AgentProjectStore,
-    project_records: ProjectRecordStore,
-    task_cache: TaskCache,
     profile_store: ModelProfileStore,
     llm_client_factory: LlmClientFactory,
 ) -> dict[str, object]:
     def respond(state: AgentWorkspaceState) -> dict[str, object]:
         return _workspace_response(state, profile_store, cache_root)
-
-    def respond_with_project(
-        state: AgentWorkspaceState, project: AgentProject
-    ) -> dict[str, object]:
-        return {**respond(state), "project": project.to_dict()}
 
     def read_workspace(_payload: Mapping[str, object]) -> dict[str, object]:
         return respond(project_store.load())
@@ -357,198 +320,6 @@ def _build_handlers(
 
         return respond(project_store.update(updater))
 
-    def create_project(payload: Mapping[str, object]) -> dict[str, object]:
-        name = expect_string(payload, "name").strip()
-        if not name:
-            raise BridgeError.invalid_argument("name must not be empty.", field="name")
-        if len(name) > _MAX_PROJECT_NAME_LENGTH:
-            raise BridgeError.invalid_argument(
-                "name is too long.",
-                field="name",
-                details={"max_length": _MAX_PROJECT_NAME_LENGTH},
-            )
-        input_dir = expect_string(payload, "input_dir").strip()
-        input_path = Path(input_dir).expanduser()
-        if not input_path.is_absolute():
-            raise BridgeError.invalid_argument(
-                "input_dir must be an absolute path.",
-                field="input_dir",
-            )
-        if not input_path.exists():
-            raise BridgeError.not_found(
-                "input_dir does not exist.",
-                details={"input_dir": str(input_path)},
-            )
-        if not input_path.is_dir():
-            raise BridgeError.invalid_argument(
-                "input_dir is not a directory.",
-                field="input_dir",
-                details={"input_dir": str(input_path)},
-            )
-        source_language = _coerce_language(payload.get("source_language"), field="source_language")
-        target_language = _coerce_language(payload.get("target_language"), field="target_language")
-
-        project = AgentProject.create(
-            name=name,
-            input_dir=str(input_path),
-            source_language=source_language,
-            target_language=target_language,
-        )
-        project_records.save(project)
-        state = project_store.update(
-            lambda current: current.upsert_project_summary(project.summary(), make_active=True)
-        )
-        return respond_with_project(state, project)
-
-    def read_project(payload: Mapping[str, object]) -> dict[str, object]:
-        project_id = expect_string(payload, "project_id")
-        try:
-            project = project_records.load(project_id)
-        except ProjectNotFoundError as exc:
-            raise BridgeError.not_found(
-                f"project {project_id!r} does not exist.",
-                details={"project_id": project_id},
-            ) from exc
-        return respond_with_project(project_store.load(), project)
-
-    def scan_project(payload: Mapping[str, object]) -> dict[str, object]:
-        project_id = expect_string(payload, "project_id")
-        try:
-            project = project_records.load(project_id)
-        except ProjectNotFoundError as exc:
-            raise BridgeError.not_found(
-                f"project {project_id!r} does not exist.",
-                details={"project_id": project_id},
-            ) from exc
-        input_path = Path(project.input_dir)
-        if not input_path.exists() or not input_path.is_dir():
-            raise BridgeError.not_found(
-                "project input_dir no longer exists or is not a directory.",
-                details={"project_id": project_id, "input_dir": project.input_dir},
-            )
-        scan = _build_scan(input_path)
-        updated = project.with_scan(scan)
-        project_records.save(updated)
-        state = project_store.update(
-            lambda current: current.upsert_project_summary(updated.summary())
-        )
-        return respond_with_project(state, updated)
-
-    def approve_project_plan(payload: Mapping[str, object]) -> dict[str, object]:
-        project_id = expect_string(payload, "project_id")
-        try:
-            project = project_records.load(project_id)
-        except ProjectNotFoundError as exc:
-            raise BridgeError.not_found(
-                f"project {project_id!r} does not exist.",
-                details={"project_id": project_id},
-            ) from exc
-        if project.status != "scanned":
-            raise BridgeError.conflict(
-                "project must be scanned before its plan can be approved.",
-                details={"project_id": project_id, "status": project.status},
-            )
-
-        plan_raw = payload.get("plan")
-        if not isinstance(plan_raw, Mapping):
-            raise BridgeError.invalid_argument(
-                "plan object is required.",
-                field="plan",
-            )
-        recipe_snapshot = _resolve_recipe_snapshot(plan_raw.get("recipe_id"))
-        plan_notes = _coerce_notes(plan_raw.get("notes"), field="plan.notes")
-        stages = _coerce_plan_stages(plan_raw.get("stages"))
-        auto_chain = bool(plan_raw.get("auto_chain", False))
-
-        task_links = _coerce_task_links(payload.get("task_links"))
-        checkpoint_notes = _coerce_notes(
-            payload.get("checkpoint_notes"), field="checkpoint_notes"
-        )
-
-        plan = ProjectPlan(
-            stages=stages,
-            recipe_snapshot=recipe_snapshot,
-            auto_chain=auto_chain,
-            notes=plan_notes,
-            proposed_at=project.scan.scanned_at if project.scan else "",
-        )
-        checkpoint = ProjectCheckpoint.create(
-            stage="project_plan",
-            status="approved",
-            notes=checkpoint_notes,
-        )
-        updated = project.with_plan_approved(
-            plan=plan, task_links=task_links, checkpoint=checkpoint
-        )
-        project_records.save(updated)
-        state = project_store.update(
-            lambda current: current.upsert_project_summary(updated.summary())
-        )
-        return respond_with_project(state, updated)
-
-    def _resolve_recipe_snapshot(recipe_id_raw: object) -> AgentRecipe | None:
-        recipe_id = _optional_str(recipe_id_raw)
-        if recipe_id is None:
-            return None
-        current = project_store.load()
-        recipe = current.get_recipe(recipe_id)
-        if recipe is None:
-            raise BridgeError.not_found(
-                f"recipe {recipe_id!r} does not exist.",
-                details={"recipe_id": recipe_id},
-            )
-        return recipe
-
-    def _coerce_task_links(value: object) -> ProjectTaskLinks:
-        if value is None:
-            return ProjectTaskLinks()
-        if not isinstance(value, Mapping):
-            raise BridgeError.invalid_argument(
-                "task_links must be an object.",
-                field="task_links",
-            )
-        result: dict[str, str | None] = {field: None for field in _TASK_LINK_FIELDS.values()}
-        for slot in PROJECT_TASK_SLOTS:
-            field_name = _TASK_LINK_FIELDS[slot]
-            if field_name not in value:
-                continue
-            raw = value.get(field_name)
-            task_id = _optional_str(raw)
-            if task_id is None:
-                result[field_name] = None
-                continue
-            expected_kind = _TASK_KIND_BY_SLOT[slot]
-            try:
-                record = task_cache.load_record(task_id)
-            except TaskNotFoundError as exc:
-                raise BridgeError.not_found(
-                    f"task {task_id!r} does not exist in the task cache.",
-                    details={"task_id": task_id, "slot": slot},
-                ) from exc
-            except (OSError, ValueError) as exc:
-                raise BridgeError.invalid_argument(
-                    f"task {task_id!r} record is unreadable.",
-                    field=f"task_links.{field_name}",
-                    details={"task_id": task_id, "slot": slot},
-                ) from exc
-            if record.kind is not expected_kind:
-                raise BridgeError.invalid_argument(
-                    f"task {task_id!r} has kind {record.kind.value!r}; expected {expected_kind.value!r}.",
-                    field=f"task_links.{field_name}",
-                    details={
-                        "task_id": task_id,
-                        "slot": slot,
-                        "actual_kind": record.kind.value,
-                        "expected_kind": expected_kind.value,
-                    },
-                )
-            result[field_name] = task_id
-        return ProjectTaskLinks(
-            glossary_task_id=result["glossary_task_id"],
-            glossary_review_task_id=result["glossary_review_task_id"],
-            translation_task_id=result["translation_task_id"],
-        )
-
     return {
         "agent.read_workspace": read_workspace,
         "agent.update_workspace": update_workspace,
@@ -565,10 +336,6 @@ def _build_handlers(
         "agent.update_recipe": update_recipe,
         "agent.delete_recipe": delete_recipe,
         "agent.apply_recipe": apply_recipe,
-        "agent.create_project": create_project,
-        "agent.read_project": read_project,
-        "agent.scan_project": scan_project,
-        "agent.approve_project_plan": approve_project_plan,
     }
 
 
@@ -988,8 +755,6 @@ def _workspace_wire(state: AgentWorkspaceState) -> dict[str, object]:
         "conversations": [
             _conversation_summary(conversation) for conversation in state.conversations
         ],
-        "projects": [project.to_dict() for project in state.projects],
-        "active_project_id": state.active_project_id,
         "messages": [message.to_dict() for message in active.messages]
         if active
         else [],
@@ -1103,118 +868,16 @@ def _generate_prompt_id(
             return candidate
 
 
-def _build_scan(input_path: Path) -> ProjectScan:
-    documents = scan_input_directory(input_path)
-    truncated = len(documents) > _MAX_SCAN_DOCUMENTS
-    kept = documents[:_MAX_SCAN_DOCUMENTS] if truncated else documents
-    doc_records: list[ProjectDocument] = []
-    total_bytes = 0
-    epub_count = 0
-    txt_count = 0
-    for doc in kept:
-        try:
-            size = doc.path.stat().st_size
-        except OSError:
-            size = 0
-        doc_records.append(
-            ProjectDocument(
-                relative_path=doc.relative_path.as_posix(),
-                format=doc.format.value,  # type: ignore[arg-type]
-                size_bytes=max(0, size),
-            )
-        )
-        total_bytes += max(0, size)
-        if doc.format.value == "epub":
-            epub_count += 1
-        elif doc.format.value == "txt":
-            txt_count += 1
-    from transoria.agent.schemas import now_iso  # noqa: PLC0415 - avoid cycle at top
-
-    return ProjectScan(
-        scanned_at=now_iso(),
-        input_dir=str(input_path),
-        documents=tuple(doc_records),
-        document_count=len(doc_records),
-        total_bytes=total_bytes,
-        epub_count=epub_count,
-        txt_count=txt_count,
-        truncated=truncated,
-    )
-
-
-def _coerce_language(value: object, *, field: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise BridgeError.invalid_argument(
-            f"{field} must be a string or null.",
-            field=field,
-        )
-    trimmed = value.strip()
-    if not trimmed:
-        return None
-    try:
-        return Language(trimmed).value
-    except ValueError as exc:
-        raise BridgeError.invalid_argument(
-            f"{field} is not a recognized language code.",
-            field=field,
-            details={"value": trimmed},
-        ) from exc
-
-
-def _coerce_notes(value: object, *, field: str) -> str:
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        raise BridgeError.invalid_argument(
-            f"{field} must be a string.",
-            field=field,
-        )
-    trimmed = value.strip()
-    if len(trimmed) > _MAX_PROJECT_NOTES_LENGTH:
-        raise BridgeError.invalid_argument(
-            f"{field} is too long.",
-            field=field,
-            details={"max_length": _MAX_PROJECT_NOTES_LENGTH},
-        )
-    return trimmed
-
-
-def _coerce_plan_stages(value: object) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, list):
-        raise BridgeError.invalid_argument(
-            "plan.stages must be a list.",
-            field="plan.stages",
-        )
-    stages: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            raise BridgeError.invalid_argument(
-                "each plan stage must be a string.",
-                field="plan.stages",
-            )
-        trimmed = item.strip()
-        if trimmed:
-            stages.append(trimmed)
-    return tuple(stages)
-
-
 def register(
     router: BridgeRouter,
     *,
     cache_root: Path,
     profile_store: ModelProfileStore,
     llm_client_factory: LlmClientFactory,
-    task_cache: TaskCache,
 ) -> None:
     handlers = _build_handlers(
         cache_root=cache_root,
         project_store=AgentProjectStore.from_cache_root(cache_root),
-        project_records=ProjectRecordStore.from_cache_root(cache_root),
-        task_cache=task_cache,
         profile_store=profile_store,
         llm_client_factory=llm_client_factory,
     )
