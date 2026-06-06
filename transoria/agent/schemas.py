@@ -19,6 +19,13 @@ PROMPT_SLOTS: tuple[str, ...] = ("translation", "term_extract", "term_review")
 
 MAX_CONVERSATION_MESSAGES = 80
 
+ProjectStatus = Literal["draft", "scanned", "plan_approved"]
+ProjectTaskSlot = Literal["glossary", "glossary_review", "translation"]
+PROJECT_TASK_SLOTS: tuple[str, ...] = ("glossary", "glossary_review", "translation")
+DocumentFormatName = Literal["epub", "txt"]
+ProjectCheckpointStage = Literal["project_plan"]
+ProjectCheckpointStatus = Literal["approved"]
+
 SEED_ASSISTANT_MESSAGE = (
     "Agent Lab is ready. Choose a workflow model, then ask me to draft prompt "
     "or workflow configuration changes."
@@ -304,6 +311,354 @@ class AgentRecipe:
 
 
 @dataclass(frozen=True)
+class ProjectDocument:
+    relative_path: str
+    format: DocumentFormatName
+    size_bytes: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ProjectDocument":
+        fmt = str(data.get("format") or "")
+        if fmt not in ("epub", "txt"):
+            fmt = "txt"
+        size_raw = data.get("size_bytes", 0)
+        try:
+            size = int(size_raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            size = 0
+        return cls(
+            relative_path=str(data.get("relative_path") or ""),
+            format=fmt,  # type: ignore[arg-type]
+            size_bytes=max(0, size),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "relative_path": self.relative_path,
+            "format": self.format,
+            "size_bytes": self.size_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class ProjectScan:
+    scanned_at: str
+    input_dir: str
+    documents: tuple[ProjectDocument, ...]
+    document_count: int
+    total_bytes: int
+    epub_count: int
+    txt_count: int
+    truncated: bool
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ProjectScan":
+        docs = data.get("documents")
+        documents = (
+            tuple(
+                ProjectDocument.from_dict(item)
+                for item in docs
+                if isinstance(item, Mapping)
+            )
+            if isinstance(docs, list)
+            else ()
+        )
+        return cls(
+            scanned_at=str(data.get("scanned_at") or now_iso()),
+            input_dir=str(data.get("input_dir") or ""),
+            documents=documents,
+            document_count=_safe_int(data.get("document_count"), len(documents)),
+            total_bytes=_safe_int(data.get("total_bytes"), 0),
+            epub_count=_safe_int(data.get("epub_count"), 0),
+            txt_count=_safe_int(data.get("txt_count"), 0),
+            truncated=bool(data.get("truncated", False)),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "scanned_at": self.scanned_at,
+            "input_dir": self.input_dir,
+            "documents": [doc.to_dict() for doc in self.documents],
+            "document_count": self.document_count,
+            "total_bytes": self.total_bytes,
+            "epub_count": self.epub_count,
+            "txt_count": self.txt_count,
+            "truncated": self.truncated,
+        }
+
+
+@dataclass(frozen=True)
+class ProjectTaskLinks:
+    """Existing task_id references for an Agent Lab project.
+
+    Each slot points at a task under <cache_root>/tasks/<task_id>/. The
+    project does NOT own these tasks; the user may swap to any earlier
+    task_id of the matching kind at plan-approval time.
+    """
+
+    glossary_task_id: str | None = None
+    glossary_review_task_id: str | None = None
+    translation_task_id: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ProjectTaskLinks":
+        return cls(
+            glossary_task_id=_optional_str(data.get("glossary_task_id")),
+            glossary_review_task_id=_optional_str(data.get("glossary_review_task_id")),
+            translation_task_id=_optional_str(data.get("translation_task_id")),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "glossary_task_id": self.glossary_task_id,
+            "glossary_review_task_id": self.glossary_review_task_id,
+            "translation_task_id": self.translation_task_id,
+        }
+
+
+@dataclass(frozen=True)
+class ProjectCheckpoint:
+    id: str
+    stage: ProjectCheckpointStage
+    status: ProjectCheckpointStatus
+    notes: str
+    decided_at: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        stage: ProjectCheckpointStage,
+        status: ProjectCheckpointStatus,
+        notes: str = "",
+    ) -> "ProjectCheckpoint":
+        return cls(
+            id=new_id("ckpt"),
+            stage=stage,
+            status=status,
+            notes=notes,
+            decided_at=now_iso(),
+        )
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ProjectCheckpoint":
+        stage = str(data.get("stage") or "project_plan")
+        if stage not in ("project_plan",):
+            stage = "project_plan"
+        status = str(data.get("status") or "approved")
+        if status not in ("approved",):
+            status = "approved"
+        return cls(
+            id=str(data.get("id") or new_id("ckpt")),
+            stage=stage,  # type: ignore[arg-type]
+            status=status,  # type: ignore[arg-type]
+            notes=str(data.get("notes") or ""),
+            decided_at=str(data.get("decided_at") or now_iso()),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "stage": self.stage,
+            "status": self.status,
+            "notes": self.notes,
+            "decided_at": self.decided_at,
+        }
+
+
+@dataclass(frozen=True)
+class ProjectPlan:
+    stages: tuple[str, ...]
+    recipe_snapshot: AgentRecipe | None
+    auto_chain: bool
+    notes: str
+    proposed_at: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ProjectPlan":
+        stages_raw = data.get("stages")
+        stages = (
+            tuple(str(item) for item in stages_raw if isinstance(item, str))
+            if isinstance(stages_raw, list)
+            else ()
+        )
+        recipe_raw = data.get("recipe_snapshot")
+        recipe = (
+            AgentRecipe.from_dict(recipe_raw)
+            if isinstance(recipe_raw, Mapping)
+            else None
+        )
+        return cls(
+            stages=stages,
+            recipe_snapshot=recipe,
+            auto_chain=bool(data.get("auto_chain", False)),
+            notes=str(data.get("notes") or ""),
+            proposed_at=str(data.get("proposed_at") or now_iso()),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "stages": list(self.stages),
+            "recipe_snapshot": (
+                self.recipe_snapshot.to_dict() if self.recipe_snapshot else None
+            ),
+            "auto_chain": self.auto_chain,
+            "notes": self.notes,
+            "proposed_at": self.proposed_at,
+        }
+
+
+@dataclass(frozen=True)
+class AgentProject:
+    id: str
+    name: str
+    input_dir: str
+    source_language: str | None
+    target_language: str | None
+    status: ProjectStatus
+    scan: ProjectScan | None
+    plan: ProjectPlan | None
+    task_links: ProjectTaskLinks
+    checkpoints: tuple[ProjectCheckpoint, ...]
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        name: str,
+        input_dir: str,
+        source_language: str | None = None,
+        target_language: str | None = None,
+    ) -> "AgentProject":
+        timestamp = now_iso()
+        return cls(
+            id=new_id("proj"),
+            name=name,
+            input_dir=input_dir,
+            source_language=source_language,
+            target_language=target_language,
+            status="draft",
+            scan=None,
+            plan=None,
+            task_links=ProjectTaskLinks(),
+            checkpoints=(),
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "AgentProject":
+        status = str(data.get("status") or "draft")
+        if status not in ("draft", "scanned", "plan_approved"):
+            status = "draft"
+        scan_raw = data.get("scan")
+        plan_raw = data.get("plan")
+        links_raw = data.get("task_links")
+        checkpoints_raw = data.get("checkpoints")
+        created_at = str(data.get("created_at") or now_iso())
+        return cls(
+            id=str(data.get("id") or new_id("proj")),
+            name=str(data.get("name") or ""),
+            input_dir=str(data.get("input_dir") or ""),
+            source_language=_optional_str(data.get("source_language")),
+            target_language=_optional_str(data.get("target_language")),
+            status=status,  # type: ignore[arg-type]
+            scan=ProjectScan.from_dict(scan_raw) if isinstance(scan_raw, Mapping) else None,
+            plan=ProjectPlan.from_dict(plan_raw) if isinstance(plan_raw, Mapping) else None,
+            task_links=(
+                ProjectTaskLinks.from_dict(links_raw)
+                if isinstance(links_raw, Mapping)
+                else ProjectTaskLinks()
+            ),
+            checkpoints=(
+                tuple(
+                    ProjectCheckpoint.from_dict(item)
+                    for item in checkpoints_raw
+                    if isinstance(item, Mapping)
+                )
+                if isinstance(checkpoints_raw, list)
+                else ()
+            ),
+            created_at=created_at,
+            updated_at=str(data.get("updated_at") or created_at),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "input_dir": self.input_dir,
+            "source_language": self.source_language,
+            "target_language": self.target_language,
+            "status": self.status,
+            "scan": self.scan.to_dict() if self.scan else None,
+            "plan": self.plan.to_dict() if self.plan else None,
+            "task_links": self.task_links.to_dict(),
+            "checkpoints": [ckpt.to_dict() for ckpt in self.checkpoints],
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    def summary(self) -> "AgentProjectSummary":
+        return AgentProjectSummary(
+            id=self.id,
+            name=self.name,
+            input_dir=self.input_dir,
+            status=self.status,
+            updated_at=self.updated_at,
+        )
+
+    def with_scan(self, scan: ProjectScan) -> "AgentProject":
+        return replace(self, scan=scan, status="scanned", updated_at=now_iso())
+
+    def with_plan_approved(
+        self,
+        *,
+        plan: ProjectPlan,
+        task_links: ProjectTaskLinks,
+        checkpoint: ProjectCheckpoint,
+    ) -> "AgentProject":
+        return replace(
+            self,
+            plan=plan,
+            task_links=task_links,
+            checkpoints=(*self.checkpoints, checkpoint),
+            status="plan_approved",
+            updated_at=now_iso(),
+        )
+
+
+@dataclass(frozen=True)
+class AgentProjectSummary:
+    id: str
+    name: str
+    input_dir: str
+    status: str
+    updated_at: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "AgentProjectSummary":
+        return cls(
+            id=str(data.get("id") or ""),
+            name=str(data.get("name") or ""),
+            input_dir=str(data.get("input_dir") or ""),
+            status=str(data.get("status") or "draft"),
+            updated_at=str(data.get("updated_at") or now_iso()),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "input_dir": self.input_dir,
+            "status": self.status,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True)
 class AgentWorkspaceState:
     workflow_model_id: str | None = None
     stage_model_ids: Mapping[str, str | None] = field(
@@ -316,6 +671,8 @@ class AgentWorkspaceState:
     recipes: tuple[AgentRecipe, ...] = ()
     conversations: tuple[AgentConversation, ...] = ()
     active_conversation_id: str | None = None
+    projects: tuple[AgentProjectSummary, ...] = ()
+    active_project_id: str | None = None
     updated_at: str = field(default_factory=now_iso)
 
     @classmethod
@@ -329,6 +686,13 @@ class AgentWorkspaceState:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> "AgentWorkspaceState":
         conversations, active_id = _conversations_from(data)
+        projects = _project_summaries_from(data.get("projects"))
+        active_project_id = _optional_str(data.get("active_project_id"))
+        if projects and (
+            active_project_id is None
+            or all(project.id != active_project_id for project in projects)
+        ):
+            active_project_id = None
         return cls(
             workflow_model_id=_optional_str(data.get("workflow_model_id")),
             stage_model_ids=_slot_mapping(data.get("stage_model_ids"), MODEL_SLOTS),
@@ -337,6 +701,8 @@ class AgentWorkspaceState:
             recipes=_recipes_from(data.get("recipes")),
             conversations=conversations,
             active_conversation_id=active_id,
+            projects=projects,
+            active_project_id=active_project_id,
             updated_at=str(data.get("updated_at") or now_iso()),
         )
 
@@ -351,6 +717,8 @@ class AgentWorkspaceState:
                 conversation.to_dict() for conversation in self.conversations
             ],
             "active_conversation_id": self.active_conversation_id,
+            "projects": [project.to_dict() for project in self.projects],
+            "active_project_id": self.active_project_id,
             "updated_at": self.updated_at,
         }
 
@@ -467,6 +835,26 @@ class AgentWorkspaceState:
         )
         return replace(self, recipes=recipes, updated_at=now_iso())
 
+    def upsert_project_summary(
+        self, summary: AgentProjectSummary, *, make_active: bool = False
+    ) -> "AgentWorkspaceState":
+        if any(existing.id == summary.id for existing in self.projects):
+            projects = tuple(
+                summary if existing.id == summary.id else existing
+                for existing in self.projects
+            )
+        else:
+            projects = (*self.projects, summary)
+        active_id = (
+            summary.id if make_active else self.active_project_id
+        )
+        return replace(
+            self,
+            projects=projects,
+            active_project_id=active_id,
+            updated_at=now_iso(),
+        )
+
 
 def _messages_from(value: object) -> tuple[AgentMessage, ...]:
     if not isinstance(value, list):
@@ -557,6 +945,23 @@ def _optional_str(value: object) -> str | None:
     if isinstance(value, str) and value:
         return value
     return None
+
+
+def _safe_int(value: object, fallback: int) -> int:
+    try:
+        return max(0, int(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _project_summaries_from(value: object) -> tuple["AgentProjectSummary", ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(
+        AgentProjectSummary.from_dict(item)
+        for item in value
+        if isinstance(item, Mapping)
+    )
 
 
 def _slot_mapping(value: object, slots: tuple[str, ...]) -> dict[str, str | None]:

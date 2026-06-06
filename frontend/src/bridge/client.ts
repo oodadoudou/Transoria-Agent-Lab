@@ -2,6 +2,9 @@ import { getTransport } from "./transport";
 import { nativeDialogs } from "./native";
 import type {
   AllSettings,
+  AgentProjectPlanInput,
+  AgentProjectResponse,
+  AgentProjectTaskLinksInput,
   AgentRecipeInput,
   AgentWorkspace,
   AgentWorkspaceResponse,
@@ -31,6 +34,7 @@ import type {
   GlossaryReviewFinalSheet,
   GlossaryReviewInputCandidates,
   GlossaryReviewReport,
+  Language,
   ModelListResult,
   ModelProfile,
   ModelProfileDraft,
@@ -323,6 +327,33 @@ export const agentBridge = {
   },
   applyRecipe(recipeId: string): Promise<AgentWorkspaceResponse> {
     return call("agent.apply_recipe", { recipe_id: recipeId });
+  },
+  createProject(input: {
+    name: string;
+    input_dir: string;
+    source_language?: Language | null;
+    target_language?: Language | null;
+  }): Promise<AgentProjectResponse> {
+    return call("agent.create_project", { ...input });
+  },
+  readProject(projectId: string): Promise<AgentProjectResponse> {
+    return call("agent.read_project", { project_id: projectId });
+  },
+  scanProject(projectId: string): Promise<AgentProjectResponse> {
+    return call("agent.scan_project", { project_id: projectId });
+  },
+  approveProjectPlan(
+    projectId: string,
+    input: {
+      plan: AgentProjectPlanInput;
+      task_links?: AgentProjectTaskLinksInput;
+      checkpoint_notes?: string;
+    },
+  ): Promise<AgentProjectResponse> {
+    return call("agent.approve_project_plan", {
+      project_id: projectId,
+      ...input,
+    });
   },
 };
 

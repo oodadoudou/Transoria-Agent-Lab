@@ -1080,3 +1080,318 @@ def test_prompt_preset_draft_missing_name_is_dropped(tmp_path: Path) -> None:
     )
     response = router.call("agent.send_message", {"message": "make a prompt"})
     assert response["workspace"]["pending_draft"] is None
+
+
+# -------- Project scaffolding (Phase A) --------
+
+
+def _input_dir(base: Path) -> Path:
+    d = base / "books"
+    d.mkdir()
+    (d / "book1.epub").write_bytes(b"x" * 100)
+    (d / "book2.txt").write_text("hello", encoding="utf-8")
+    (d / "notes.md").write_text("ignore", encoding="utf-8")
+    return d
+
+
+def test_create_project_validates_input_dir_existence(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    with pytest.raises(BridgeError):
+        router.call(
+            "agent.create_project",
+            {"name": "X", "input_dir": str(tmp_path / "does-not-exist")},
+        )
+
+
+def test_create_project_requires_absolute_input_dir(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    with pytest.raises(BridgeError):
+        router.call(
+            "agent.create_project",
+            {"name": "X", "input_dir": "relative/path"},
+        )
+
+
+def test_create_project_rejects_empty_name(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    with pytest.raises(BridgeError):
+        router.call(
+            "agent.create_project",
+            {"name": "   ", "input_dir": str(input_dir)},
+        )
+
+
+def test_create_project_rejects_unknown_language(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    with pytest.raises(BridgeError):
+        router.call(
+            "agent.create_project",
+            {
+                "name": "X",
+                "input_dir": str(input_dir),
+                "source_language": "klingon",
+            },
+        )
+
+
+def test_create_project_succeeds_and_adds_summary(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    response = router.call(
+        "agent.create_project",
+        {
+            "name": "Novel A",
+            "input_dir": str(input_dir),
+            "source_language": "kr",
+            "target_language": "zh",
+        },
+    )
+    project = response["project"]
+    assert project["status"] == "draft"
+    assert project["source_language"] == "kr"
+    assert project["target_language"] == "zh"
+    summaries = response["workspace"]["projects"]
+    assert len(summaries) == 1
+    assert summaries[0]["id"] == project["id"]
+    assert response["workspace"]["active_project_id"] == project["id"]
+
+
+def test_read_project_returns_full_record(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    created = router.call(
+        "agent.create_project",
+        {"name": "X", "input_dir": str(input_dir)},
+    )["project"]
+    fetched = router.call("agent.read_project", {"project_id": created["id"]})["project"]
+    assert fetched == created
+
+
+def test_read_project_missing_id_raises_not_found(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    with pytest.raises(BridgeError):
+        router.call("agent.read_project", {"project_id": "proj-missing"})
+
+
+def test_scan_project_records_documents_and_totals(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    created = router.call(
+        "agent.create_project",
+        {"name": "X", "input_dir": str(input_dir)},
+    )["project"]
+    scanned = router.call(
+        "agent.scan_project", {"project_id": created["id"]}
+    )["project"]
+    assert scanned["status"] == "scanned"
+    scan = scanned["scan"]
+    assert scan["document_count"] == 2
+    assert scan["epub_count"] == 1
+    assert scan["txt_count"] == 1
+    assert scan["truncated"] is False
+    rels = sorted(doc["relative_path"] for doc in scan["documents"])
+    assert rels == ["book1.epub", "book2.txt"]
+
+
+def test_scan_project_missing_id_raises_not_found(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    with pytest.raises(BridgeError):
+        router.call("agent.scan_project", {"project_id": "proj-missing"})
+
+
+def test_scan_project_when_input_dir_disappeared(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    created = router.call(
+        "agent.create_project",
+        {"name": "X", "input_dir": str(input_dir)},
+    )["project"]
+    # delete input dir before scanning
+    import shutil
+
+    shutil.rmtree(input_dir)
+    with pytest.raises(BridgeError):
+        router.call("agent.scan_project", {"project_id": created["id"]})
+
+
+def test_approve_project_plan_requires_scanned_state(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    created = router.call(
+        "agent.create_project",
+        {"name": "X", "input_dir": str(input_dir)},
+    )["project"]
+    with pytest.raises(BridgeError):
+        router.call(
+            "agent.approve_project_plan",
+            {"project_id": created["id"], "plan": {}},
+        )
+
+
+def test_approve_project_plan_succeeds_and_snapshots_recipe(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    # Create a recipe to snapshot.
+    recipe_response = router.call(
+        "agent.create_recipe",
+        {
+            "name": "Conservative",
+            "description": "smoke",
+        },
+    )
+    recipe_id = recipe_response["workspace"]["recipes"][0]["id"]
+
+    created = router.call(
+        "agent.create_project",
+        {"name": "X", "input_dir": str(input_dir)},
+    )["project"]
+    router.call("agent.scan_project", {"project_id": created["id"]})
+
+    approved = router.call(
+        "agent.approve_project_plan",
+        {
+            "project_id": created["id"],
+            "plan": {
+                "recipe_id": recipe_id,
+                "stages": ["glossary", "translation"],
+                "auto_chain": True,
+                "notes": "let's go",
+            },
+            "checkpoint_notes": "first checkpoint",
+        },
+    )["project"]
+    assert approved["status"] == "plan_approved"
+    assert approved["plan"]["auto_chain"] is True
+    assert approved["plan"]["stages"] == ["glossary", "translation"]
+    snapshot = approved["plan"]["recipe_snapshot"]
+    assert snapshot is not None
+    assert snapshot["id"] == recipe_id
+    assert snapshot["name"] == "Conservative"
+    assert approved["checkpoints"][-1]["notes"] == "first checkpoint"
+    assert approved["checkpoints"][-1]["stage"] == "project_plan"
+    assert approved["checkpoints"][-1]["status"] == "approved"
+
+
+def test_approve_project_plan_rejects_unknown_recipe(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    created = router.call(
+        "agent.create_project",
+        {"name": "X", "input_dir": str(input_dir)},
+    )["project"]
+    router.call("agent.scan_project", {"project_id": created["id"]})
+    with pytest.raises(BridgeError):
+        router.call(
+            "agent.approve_project_plan",
+            {
+                "project_id": created["id"],
+                "plan": {"recipe_id": "recipe-missing"},
+            },
+        )
+
+
+def test_approve_project_plan_rejects_bad_task_link(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    created = router.call(
+        "agent.create_project",
+        {"name": "X", "input_dir": str(input_dir)},
+    )["project"]
+    router.call("agent.scan_project", {"project_id": created["id"]})
+    with pytest.raises(BridgeError):
+        router.call(
+            "agent.approve_project_plan",
+            {
+                "project_id": created["id"],
+                "plan": {},
+                "task_links": {"glossary_task_id": "glossary-does-not-exist"},
+            },
+        )
+
+
+def test_approve_project_plan_accepts_existing_task_id_matching_kind(
+    tmp_path: Path,
+) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+
+    # Seed a real glossary task record in the task cache.
+    from transoria.runtime.cache import TaskCache
+    from transoria.runtime.task_record import TaskRecord
+    from transoria.domain import TaskKind
+
+    task_cache = TaskCache(root=tmp_path / "tasks")
+    glossary_record = TaskRecord(
+        id="glossary-abc123",
+        kind=TaskKind.GLOSSARY,
+        created_at="2026-06-06T00:00:00+00:00",
+        updated_at="2026-06-06T00:00:00+00:00",
+    )
+    task_cache.save_task(glossary_record)
+
+    created = router.call(
+        "agent.create_project",
+        {"name": "X", "input_dir": str(input_dir)},
+    )["project"]
+    router.call("agent.scan_project", {"project_id": created["id"]})
+    approved = router.call(
+        "agent.approve_project_plan",
+        {
+            "project_id": created["id"],
+            "plan": {},
+            "task_links": {"glossary_task_id": "glossary-abc123"},
+        },
+    )["project"]
+    assert approved["task_links"]["glossary_task_id"] == "glossary-abc123"
+
+
+def test_approve_project_plan_rejects_task_kind_mismatch(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+
+    from transoria.runtime.cache import TaskCache
+    from transoria.runtime.task_record import TaskRecord
+    from transoria.domain import TaskKind
+
+    task_cache = TaskCache(root=tmp_path / "tasks")
+    record = TaskRecord(
+        id="translation-xyz",
+        kind=TaskKind.TRANSLATION,
+        created_at="2026-06-06T00:00:00+00:00",
+        updated_at="2026-06-06T00:00:00+00:00",
+    )
+    task_cache.save_task(record)
+
+    created = router.call(
+        "agent.create_project",
+        {"name": "X", "input_dir": str(input_dir)},
+    )["project"]
+    router.call("agent.scan_project", {"project_id": created["id"]})
+    with pytest.raises(BridgeError):
+        # Linking a translation task into the glossary slot should fail.
+        router.call(
+            "agent.approve_project_plan",
+            {
+                "project_id": created["id"],
+                "plan": {},
+                "task_links": {"glossary_task_id": "translation-xyz"},
+            },
+        )
+
+
+def test_create_project_round_trips_through_workspace(tmp_path: Path) -> None:
+    router = build_default_router(cache_root=tmp_path)
+    input_dir = _input_dir(tmp_path)
+    response = router.call(
+        "agent.create_project",
+        {"name": "Persist Me", "input_dir": str(input_dir)},
+    )
+    project_id = response["project"]["id"]
+    # Build a fresh router pointing at the same cache and read the project back.
+    router2 = build_default_router(cache_root=tmp_path)
+    fetched = router2.call("agent.read_project", {"project_id": project_id})["project"]
+    assert fetched["id"] == project_id
+    summaries = router2.call("agent.read_workspace", {})["workspace"]["projects"]
+    assert any(s["id"] == project_id for s in summaries)

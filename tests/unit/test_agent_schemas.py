@@ -104,3 +104,132 @@ def test_from_dict_without_conversations_or_messages_is_empty() -> None:
     state = AgentWorkspaceState.from_dict({"workflow_model_id": None})
     assert state.conversations == ()
     assert state.active_conversation_id is None
+
+
+# -------- Project schemas (Phase A scaffolding) --------
+
+from transoria.agent.schemas import (  # noqa: E402
+    AgentProject,
+    AgentProjectSummary,
+    ProjectCheckpoint,
+    ProjectDocument,
+    ProjectPlan,
+    ProjectScan,
+    ProjectTaskLinks,
+)
+
+
+def test_project_create_starts_in_draft_with_no_scan_or_plan() -> None:
+    project = AgentProject.create(name="N", input_dir="/abs")
+    assert project.status == "draft"
+    assert project.scan is None
+    assert project.plan is None
+    assert project.task_links == ProjectTaskLinks()
+    assert project.checkpoints == ()
+
+
+def test_project_round_trips_through_dict() -> None:
+    project = AgentProject.create(
+        name="N",
+        input_dir="/abs",
+        source_language="kr",
+        target_language="zh",
+    )
+    restored = AgentProject.from_dict(project.to_dict())
+    assert restored == project
+
+
+def test_project_with_scan_advances_status() -> None:
+    project = AgentProject.create(name="N", input_dir="/abs")
+    scan = ProjectScan(
+        scanned_at="2026-06-06T00:00:00+00:00",
+        input_dir="/abs",
+        documents=(ProjectDocument(relative_path="a.epub", format="epub", size_bytes=10),),
+        document_count=1,
+        total_bytes=10,
+        epub_count=1,
+        txt_count=0,
+        truncated=False,
+    )
+    updated = project.with_scan(scan)
+    assert updated.status == "scanned"
+    assert updated.scan == scan
+
+
+def test_project_with_plan_approved_appends_checkpoint() -> None:
+    project = AgentProject.create(name="N", input_dir="/abs")
+    plan = ProjectPlan(
+        stages=("glossary",),
+        recipe_snapshot=None,
+        auto_chain=True,
+        notes="go",
+        proposed_at="2026-06-06T00:00:00+00:00",
+    )
+    checkpoint = ProjectCheckpoint.create(stage="project_plan", status="approved", notes="ok")
+    updated = project.with_plan_approved(
+        plan=plan,
+        task_links=ProjectTaskLinks(glossary_task_id="glossary-x"),
+        checkpoint=checkpoint,
+    )
+    assert updated.status == "plan_approved"
+    assert updated.plan == plan
+    assert updated.task_links.glossary_task_id == "glossary-x"
+    assert updated.checkpoints[-1] is checkpoint
+
+
+def test_project_summary_round_trip() -> None:
+    summary = AgentProjectSummary(
+        id="proj-x",
+        name="N",
+        input_dir="/abs",
+        status="draft",
+        updated_at="2026-06-06T00:00:00+00:00",
+    )
+    assert AgentProjectSummary.from_dict(summary.to_dict()) == summary
+
+
+def test_workspace_upsert_project_summary_inserts_and_updates() -> None:
+    state = AgentWorkspaceState.empty()
+    s1 = AgentProjectSummary(
+        id="proj-1", name="A", input_dir="/abs", status="draft", updated_at="t1"
+    )
+    s2 = AgentProjectSummary(
+        id="proj-1", name="B", input_dir="/abs", status="scanned", updated_at="t2"
+    )
+    after_first = state.upsert_project_summary(s1, make_active=True)
+    assert after_first.active_project_id == "proj-1"
+    assert after_first.projects == (s1,)
+    after_second = after_first.upsert_project_summary(s2)
+    assert len(after_second.projects) == 1
+    assert after_second.projects[0].name == "B"
+    assert after_second.active_project_id == "proj-1"
+
+
+def test_workspace_from_dict_drops_unknown_active_project_id() -> None:
+    state = AgentWorkspaceState.from_dict(
+        {
+            "projects": [
+                {
+                    "id": "proj-1",
+                    "name": "A",
+                    "input_dir": "/abs",
+                    "status": "draft",
+                    "updated_at": "t1",
+                }
+            ],
+            "active_project_id": "missing",
+        }
+    )
+    assert state.active_project_id is None
+
+
+def test_project_from_dict_normalizes_bad_status() -> None:
+    project = AgentProject.from_dict(
+        {"id": "proj-1", "name": "N", "input_dir": "/abs", "status": "weird"}
+    )
+    assert project.status == "draft"
+
+
+def test_project_plan_from_dict_filters_non_string_stages() -> None:
+    plan = ProjectPlan.from_dict({"stages": ["a", 7, "b", None, "c"]})
+    assert plan.stages == ("a", "b", "c")
