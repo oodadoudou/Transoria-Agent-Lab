@@ -46,6 +46,7 @@ EXPECTED_METHODS: tuple[str, ...] = (
     "agent.send_message",
     "agent.apply_draft",
     "agent.discard_draft",
+    "agent.revise_draft",
     "agent.create_conversation",
     "agent.switch_conversation",
     "agent.rename_conversation",
@@ -236,7 +237,8 @@ def test_backend_registers_full_contract(router):
     # 6 added 2026-06-06 (agent conversation list + direct memory management).
     # 4 added 2026-06-06 (agent recipe create/update/delete/apply).
     # 6 added 2026-06-06 (agent read-only status/config query surface).
-    assert len(actual) == 149
+    # 1 added 2026-06-06 (agent draft revision).
+    assert len(actual) == 150
 # Test 2 — frontend bridge wraps every backend method
 
 
@@ -285,6 +287,7 @@ MIN_PAYLOADS: dict[str, dict[str, object]] = {
     "agent.send_message": {"message": "hello"},
     "agent.apply_draft": {"draft_id": "missing"},
     "agent.discard_draft": {"draft_id": "missing"},
+    "agent.revise_draft": {"draft_id": "missing", "adjustment": "rename"},
     "agent.create_conversation": {},
     "agent.switch_conversation": {"conversation_id": "missing"},
     "agent.rename_conversation": {"conversation_id": "missing", "title": "x"},

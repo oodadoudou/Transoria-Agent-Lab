@@ -115,6 +115,25 @@ def _seed_weak_profile(cache_root: Path) -> ModelConfig:
     )
 
 
+def _seed_deepseek_profile(cache_root: Path) -> ModelConfig:
+    store = ModelProfileStore.from_cache_root(cache_root)
+    return store.create(
+        ModelConfig(
+            id="deepseek-f",
+            display_name="DeepSeek-f",
+            provider_format=ProviderFormat.OPENAI,
+            base_url="http://127.0.0.1:7861/antigravity/v1",
+            model_id="deepseek-v4-flash",
+            api_keys=("deepseek-key",),
+            concurrency_limit=2,
+            rpm_limit=90,
+            tpm_limit=12345,
+            retry_attempts=3,
+            thinking_level=ThinkingLevel.LOW,
+        )
+    )
+
+
 def _seed_thinking_profile(cache_root: Path) -> ModelConfig:
     store = ModelProfileStore.from_cache_root(cache_root)
     return store.create(
@@ -1412,9 +1431,10 @@ def test_send_message_calls_api_with_system_prompt_and_inventory(
     router, fake = _router_with_workflow(tmp_path, '{"reply":"ok","draft":null}')
 
     router.call("agent.send_message", {"message": "configure things"})
+    router.call("agent.send_message", {"message": "use the previous context"})
 
-    assert len(fake.requests) == 1
-    request = fake.requests[0]
+    assert len(fake.requests) == 2
+    request = fake.requests[-1]
     assert request.model.id == "profile-workflow"
     assert request.system_prompt == AGENT_SYSTEM_PROMPT
     assert request.stream is False
@@ -1422,7 +1442,9 @@ def test_send_message_calls_api_with_system_prompt_and_inventory(
     assert request.json_response_schema_name == "agent_configuration_response"
     # The user prompt carries the inventory and the user's message.
     assert "profile-workflow" in request.user_prompt
+    assert "base_url" in request.user_prompt
     assert "configure things" in request.user_prompt
+    assert "use the previous context" in request.user_prompt
 
 
 def test_send_message_falls_back_when_schema_request_is_rejected(
@@ -1920,6 +1942,118 @@ def test_agent_create_model_profile_draft_masks_api_key_preview(
     assert applied["result"]["profile"]["api_key_status"] == "present"
     assert secret not in json.dumps(applied["workspace"]["draft_history"])
     assert secret not in json.dumps(applied["result"])
+
+
+def test_agent_directly_drafts_model_profile_copy_from_existing_config(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    source = _seed_deepseek_profile(tmp_path)
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "再给我按照 DeepSeek flash 的配置，配置一个 DeepSeek Pro。"
+                "除了模型名称之外，其他的都是一样的，模型名字叫做 DeepSeek-P。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "create_model_profile"
+    assert draft["payload"]["profile"]["copy_from_profile_id"] == source.id
+    assert draft["payload"]["profile"]["display_name"] == "DeepSeek-P"
+    assert draft["payload"]["profile"]["model_id"] == "deepseek-v4-flash"
+    assert "deepseek-key" not in json.dumps(draft)
+
+    router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    created = [
+        profile
+        for profile in ModelProfileStore.from_cache_root(tmp_path).load()
+        if profile.display_name == "DeepSeek-P"
+    ]
+    assert len(created) == 1
+    assert created[0].base_url == source.base_url
+    assert created[0].model_id == source.model_id
+    assert created[0].api_keys == source.api_keys
+    assert created[0].concurrency_limit == source.concurrency_limit
+    assert created[0].thinking_level == source.thinking_level
+
+
+def test_agent_model_profile_copy_uses_recent_context_for_short_confirmation(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    fake = FakeAgentClient('{"reply":"我需要确认。","draft":null}')
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+    router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "按照 DeepSeek flash 的配置复制一个新模型配置，"
+                "模型名字叫做 DeepSeek-P。"
+            )
+        },
+    )
+    workspace = router.call("agent.read_workspace", {})["workspace"]
+    router.call(
+        "agent.discard_draft",
+        {"draft_id": workspace["pending_draft"]["id"]},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "对的，创建一个新的。"},
+    )
+
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "create_model_profile"
+    assert draft["payload"]["profile"]["display_name"] == "DeepSeek-P"
+
+
+def test_agent_model_profile_copy_asks_only_for_missing_provider_model_id(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "从 DeepSeek flash 的配置复制创建一个新的，不要用相同的模型 ID，"
+                "而是用一样的 URL 和 provider format，"
+                "然后将模型名称改为 DeepSeek 4 Pro。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    assert response["workspace"]["pending_draft"] is None
+    content = response["workspace"]["messages"][-1]["content"]
+    assert "准确 model_id" in content
+    assert "提供 base_url" not in content
+    assert "确认 base_url" not in content
 
 
 def test_agent_update_model_profile_draft_can_rotate_keys_with_masked_preview(

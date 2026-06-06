@@ -117,6 +117,13 @@ Configuration reliability rules:
 - If the user asks for a model preset, include the concrete provider format,
   base URL, model id, concurrency/rate-limit fields, and API keys only when
   supplied. Explain that the user must confirm before saving.
+- If the user asks to copy, duplicate, clone, or create a new model profile from
+  an existing model profile, preserve the referenced profile's provider_format,
+  base_url, model_id, concurrency/rate-limit fields, retry fields, thinking
+  fields, and API key configured status unless the user explicitly names a field
+  to change. Treat "模型名称/名字/display name" as the user-facing
+  display_name. Do not ask for a different provider model_id unless the user
+  explicitly says "model_id", "模型 ID", "接口模型", or "provider model".
 - If the user asks for a recipe, make it clear that the recipe combines stage
   model selections and stage prompt selections for translation, term extraction,
   and term review. Missing stage choices should be null only when the user
@@ -402,19 +409,30 @@ def build_user_prompt(
     user_message: str,
     inventory: Mapping[str, object],
     current_state: Mapping[str, object],
+    conversation_context: list[Mapping[str, object]] | None = None,
 ) -> str:
-    return "\n\n".join(
+    sections = [
+        "Current Agent Lab workspace state:",
+        json.dumps(current_state, ensure_ascii=False, indent=2),
+        "Available inventory:",
+        json.dumps(inventory, ensure_ascii=False, indent=2),
+    ]
+    if conversation_context:
+        sections.extend(
+            (
+                "Recent conversation context:",
+                json.dumps(conversation_context, ensure_ascii=False, indent=2),
+            )
+        )
+    sections.extend(
         (
-            "Current Agent Lab workspace state:",
-            json.dumps(current_state, ensure_ascii=False, indent=2),
-            "Available inventory:",
-            json.dumps(inventory, ensure_ascii=False, indent=2),
             "Response checklist:",
             "\n".join(
                 (
                     "- Return compact JSON only.",
                     "- One reply plus either one draft or null.",
                     "- Ask a follow-up instead of inventing missing config.",
+                    "- Resolve references against the inventory before asking follow-up questions.",
                     "- Warn about weak/low-cost models in critical stages.",
                     "- Never echo API keys in reply text.",
                 )
@@ -423,6 +441,7 @@ def build_user_prompt(
             user_message,
         )
     )
+    return "\n\n".join(sections)
 
 
 class AgentResponseParseError(ValueError):

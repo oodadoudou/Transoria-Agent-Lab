@@ -589,10 +589,39 @@ def _generate_reply(
         settings_store=settings_store,
         task_service=task_service,
     )
+    conversation_context = _recent_conversation_context(state)
+    direct = None
+    if not user_message.startswith("The user clicked Adjust on the current pending draft."):
+        direct = _direct_model_profile_copy_response(
+            user_message=user_message,
+            conversation_context=conversation_context,
+            profile_store=profile_store,
+        )
+    if direct is not None:
+        reply, draft = direct
+        if draft is not None:
+            try:
+                _validate_draft(
+                    draft,
+                    state=state,
+                    profile_store=profile_store,
+                    cache_root=cache_root,
+                    task_service=task_service,
+                )
+            except BridgeError as exc:
+                return (f"{reply}\n\n（已忽略无法应用的草案：{exc}）".strip(), None)
+            reply = _append_model_quality_warnings(
+                reply,
+                draft=draft,
+                state=state,
+                profile_store=profile_store,
+            )
+        return reply, draft
     prompt = build_user_prompt(
         user_message=user_message,
         inventory=inventory,
         current_state=current_state,
+        conversation_context=conversation_context,
     )
     model = _profile_for_workflow_chat(profile, state.workflow_thinking_level)
     client = llm_client_factory()
@@ -847,6 +876,269 @@ def _salvage_invalid_agent_draft(
             cache_root=cache_root,
         )
     return None
+
+
+def _recent_conversation_context(
+    state: AgentWorkspaceState,
+) -> list[Mapping[str, object]]:
+    conversation = state.active()
+    if conversation is None:
+        return []
+    return [
+        {
+            "role": message.role,
+            "content": message.content[:1200],
+        }
+        for message in conversation.messages[-8:]
+    ]
+
+
+def _direct_model_profile_copy_response(
+    *,
+    user_message: str,
+    conversation_context: list[Mapping[str, object]],
+    profile_store: ModelProfileStore,
+) -> tuple[str, AgentActionDraft | None] | None:
+    context_text = "\n".join(
+        str(item.get("content") or "") for item in conversation_context
+    )
+    combined_text = "\n".join((context_text, user_message))
+    if not _looks_like_model_profile_copy_request(combined_text):
+        return None
+
+    source = _resolve_model_profile_from_copy_request(
+        combined_text,
+        profile_store=profile_store,
+    )
+    if source is None:
+        return (
+            "我理解你想基于已有模型配置复制创建一个新配置，但没有在当前模型库中唯一匹配到源模型。请明确要复制哪个模型配置名称。",
+            None,
+        )
+
+    display_name = _extract_model_copy_display_name(user_message)
+    if not display_name:
+        display_name = _extract_model_copy_display_name(combined_text)
+    if not display_name:
+        return (
+            f"我可以基于 {source.display_name} 复制创建新模型配置。请明确新配置的显示名称。",
+            None,
+        )
+
+    provider_model_id = _extract_provider_model_id_override(user_message)
+    if provider_model_id is None:
+        provider_model_id = _extract_provider_model_id_override(combined_text)
+    if _requests_different_provider_model_id(user_message) and not provider_model_id:
+        return (
+            (
+                f"我可以复用 {source.display_name} 的 provider_format、base_url、并发/限速和 API key 状态，"
+                f"并把新配置显示名称设为 {display_name}。但你明确要求不要复用相同的模型 ID，"
+                "请给出要写入 provider 的准确 model_id。"
+            ),
+            None,
+        )
+
+    profile_payload = _model_profile_copy_payload(
+        source,
+        display_name=display_name,
+        provider_model_id=provider_model_id,
+    )
+    model_id_note = (
+        f"provider model_id 改为 {provider_model_id}"
+        if provider_model_id
+        else f"provider model_id 保持为 {source.model_id}"
+    )
+    draft = AgentActionDraft.create(
+        kind="create_model_profile",
+        title=f"复制模型配置为 {display_name}",
+        summary=(
+            f"基于 {source.display_name} 创建新模型配置 {display_name}，"
+            f"{model_id_note}，其余运行参数保持一致。"
+        ),
+        payload={"profile": profile_payload},
+    )
+    return (
+        (
+            f"我会基于 {source.display_name} 复制创建新模型配置 {display_name}。"
+            f"{model_id_note}；provider_format、base_url、并发/限速、重试、思考配置和已配置的 API key 状态保持一致。"
+            "请在草案中确认后应用。"
+        ),
+        draft,
+    )
+
+
+def _looks_like_model_profile_copy_request(text: str) -> bool:
+    normalized = text.lower()
+    has_model = any(marker in normalized for marker in ("模型", "model", "profile"))
+    has_copy = any(
+        marker in normalized
+        for marker in (
+            "按照",
+            "基于",
+            "复制",
+            "克隆",
+            "参照",
+            "照着",
+            "一样的",
+            "same",
+            "copy",
+            "clone",
+            "duplicate",
+        )
+    )
+    has_create = any(
+        marker in normalized
+        for marker in (
+            "创建",
+            "新建",
+            "配置一个",
+            "新模型",
+            "新配置",
+            "复制一个",
+            "复制一套",
+            "add",
+            "create",
+        )
+    )
+    return has_model and has_copy and has_create
+
+
+def _model_profile_copy_payload(
+    source: ModelConfig,
+    *,
+    display_name: str,
+    provider_model_id: str | None,
+) -> dict[str, object]:
+    body = source.to_dict()
+    body.pop("id", None)
+    body.pop("api_keys", None)
+    body["copy_from_profile_id"] = source.id
+    body["display_name"] = display_name
+    if provider_model_id:
+        body["model_id"] = provider_model_id
+    return body
+
+
+def _resolve_model_profile_from_copy_request(
+    text: str,
+    *,
+    profile_store: ModelProfileStore,
+) -> ModelConfig | None:
+    labels = _extract_model_copy_source_labels(text)
+    for label in labels:
+        resolved = _resolve_model_profile_by_label(label, profile_store)
+        if resolved is not None:
+            return resolved
+        fuzzy = _resolve_model_profile_by_fuzzy_text(label, profile_store)
+        if fuzzy is not None:
+            return fuzzy
+    return _resolve_model_profile_by_fuzzy_text(text, profile_store)
+
+
+def _extract_model_copy_source_labels(text: str) -> list[str]:
+    labels: list[str] = []
+    patterns = (
+        r"(?:按照|基于|参照|照着|复制|克隆|从)\s*([A-Za-z0-9_.\-\s]+?)\s*(?:的配置|配置|模型|profile)",
+        r"(?:copy|clone|duplicate|from|based on)\s+([A-Za-z0-9_.\-\s]+?)(?:\s+profile|\s+model|$)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            label = match.group(1).strip(" \t\n\r:：，。,.")
+            if label:
+                labels.append(label)
+    return labels
+
+
+def _resolve_model_profile_by_fuzzy_text(
+    text: str,
+    profile_store: ModelProfileStore,
+) -> ModelConfig | None:
+    text_tokens = _lookup_tokens(text)
+    if not text_tokens:
+        return None
+    scored: list[tuple[int, ModelConfig]] = []
+    normalized_text = _normalize_lookup_label(text)
+    for profile in profile_store.load():
+        labels = (profile.id, profile.display_name, profile.model_id)
+        score = 0
+        for label in labels:
+            normalized_label = _normalize_lookup_label(label)
+            if normalized_label and normalized_label in normalized_text:
+                score += 6
+            score += len(text_tokens & _lookup_tokens(label))
+        if score:
+            scored.append((score, profile))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if scored[0][0] < 2:
+        return None
+    if len(scored) > 1 and scored[0][0] == scored[1][0]:
+        return None
+    return scored[0][1]
+
+
+def _lookup_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", value.lower())
+        if token
+        not in {
+            "api",
+            "base",
+            "config",
+            "format",
+            "id",
+            "key",
+            "model",
+            "profile",
+            "provider",
+            "url",
+            "一样",
+            "一样的",
+            "不同",
+            "新的",
+            "模型",
+            "相同",
+            "配置",
+        }
+    }
+
+
+def _extract_model_copy_display_name(text: str) -> str:
+    patterns = (
+        r"(?:模型(?:显示)?(?:名称|名字|名)|display_name|display name)\s*(?:叫做|叫|改为|改成|设为|设置为|为|=|:|：)\s*[「『“\"']?(.+?)[」』”\"']?(?:[，。,.]|$)",
+        r"(?:配置|创建|新建)(?:一个|一套)?\s*[「『“\"']?(.+?)[」』”\"']?(?:的)?(?:新)?模型(?:配置)?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = match.group(1).strip(" \t\n\r「」『』“”\"'")
+            if value:
+                return value[:_MAX_TITLE_LENGTH]
+    return ""
+
+
+def _extract_provider_model_id_override(text: str) -> str | None:
+    patterns = (
+        r"(?:model[_\s-]?id|模型\s*ID|接口模型|provider\s+model(?:\s+id)?)\s*(?:改为|改成|设置为|设为|使用|用|为|=|:|：)\s*[`\"']?([^`\"'，。,\s]+)",
+        r"[`\"']([A-Za-z0-9_.:/\-]+)[`\"']\s*(?:这个)?\s*(?:model[_\s-]?id|模型\s*ID|接口模型)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = match.group(1).strip()
+            if value:
+                return value[:_MAX_TITLE_LENGTH]
+    return None
+
+
+def _requests_different_provider_model_id(text: str) -> bool:
+    normalized = text.lower()
+    return bool(
+        re.search(r"(?:不要|不|不能|别).{0,8}(?:相同|一样).{0,8}(?:model[_\s-]?id|模型\s*id)", normalized)
+        or re.search(r"(?:model[_\s-]?id|模型\s*id|接口模型).{0,12}(?:新的|不同|不一样|改为|改成|换成)", normalized)
+    )
 
 
 def _salvage_create_prompt_draft(
@@ -1326,7 +1618,13 @@ def _model_quality_warnings(
                     add(slot, profile_store.get(profile_id))
     elif draft.kind == "create_model_profile":
         try:
-            add("new_profile", _model_profile_from_draft_payload(draft.payload))
+            add(
+                "new_profile",
+                _model_profile_from_draft_payload(
+                    draft.payload,
+                    profile_store=profile_store,
+                ),
+            )
         except BridgeError:
             return warnings
     elif draft.kind == "update_model_profile":
@@ -2051,7 +2349,10 @@ def _validate_create_model_profile_action(
     profile_store: ModelProfileStore,
     **_: object,
 ) -> None:
-    profile = _model_profile_from_draft_payload(draft.payload)
+    profile = _model_profile_from_draft_payload(
+        draft.payload,
+        profile_store=profile_store,
+    )
     if profile_store.get(profile.id) is not None:
         raise BridgeError.conflict(f"profile id already exists: {profile.id!r}")
 
@@ -2063,7 +2364,10 @@ def _apply_create_model_profile_action(
     profile_store: ModelProfileStore,
     **_: object,
 ) -> tuple[AgentWorkspaceState, dict[str, object]]:
-    profile = _model_profile_from_draft_payload(draft.payload)
+    profile = _model_profile_from_draft_payload(
+        draft.payload,
+        profile_store=profile_store,
+    )
     try:
         stored = profile_store.create(profile)
     except ValueError as exc:
@@ -2637,16 +2941,49 @@ def _coerce_memories_payload(payload: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(memories)
 
 
-def _model_profile_from_draft_payload(payload: Mapping[str, object]) -> ModelConfig:
+def _model_profile_from_draft_payload(
+    payload: Mapping[str, object],
+    *,
+    profile_store: ModelProfileStore | None = None,
+) -> ModelConfig:
     raw_profile = payload.get("profile")
     body = dict(raw_profile) if isinstance(raw_profile, Mapping) else dict(payload)
+    source_profile_id = str(
+        body.pop("copy_from_profile_id", None)
+        or body.pop("source_profile_id", None)
+        or ""
+    ).strip()
+    copied_api_keys: tuple[str, ...] = ()
+    if source_profile_id:
+        if profile_store is None:
+            raise BridgeError.invalid_argument(
+                "copy_from_profile_id requires profile store access.",
+                field="copy_from_profile_id",
+            )
+        source = profile_store.get(source_profile_id)
+        if source is None:
+            raise BridgeError.not_found(
+                f"profile {source_profile_id!r} does not exist.",
+                details={"id": source_profile_id},
+            )
+        source_body = source.to_dict()
+        source_body.pop("id", None)
+        source_body.pop("api_keys", None)
+        source_body.update(body)
+        body = source_body
+        copied_api_keys = source.api_keys
     body.setdefault("id", _generate_model_profile_id(body))
-    api_keys = body.pop("api_keys", ())
+    api_keys = body.pop("api_keys", None)
     try:
         profile = ModelConfig.from_dict(body)
     except (KeyError, TypeError, ValueError) as exc:
         raise BridgeError.invalid_argument(str(exc)) from exc
-    return profile.with_api_keys(_coerce_api_keys(api_keys))
+    keys = (
+        copied_api_keys
+        if api_keys is None and source_profile_id
+        else _coerce_api_keys(api_keys)
+    )
+    return profile.with_api_keys(keys)
 
 
 def _coerce_model_profile_update_payload(
@@ -3262,6 +3599,7 @@ def _inventory(profile_store: ModelProfileStore, cache_root: Path) -> dict[str, 
                 "id": profile.id,
                 "display_name": profile.display_name,
                 "provider_format": profile.provider_format.value,
+                "base_url": profile.base_url,
                 "model_id": profile.model_id,
                 "api_key_configured": bool(profile.api_keys),
                 "thinking_level": profile.thinking_level.value,
