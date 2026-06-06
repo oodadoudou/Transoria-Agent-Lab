@@ -2001,6 +2001,37 @@ def test_prompt_preset_name_without_alphanumerics_still_creates(tmp_path: Path) 
     assert applied["result"]["preset"]["id"].startswith("agent-translation-")
 
 
+def test_prompt_preset_draft_accepts_stage_and_prompt_aliases(tmp_path: Path) -> None:
+    router, _ = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "Drafting.",
+          "draft": {
+            "kind": "create_prompt_preset",
+            "title": "Alias prompt",
+            "summary": "uses model-style aliases",
+            "payload": {
+              "kind": "term_review",
+              "name": "审查别名",
+              "prompt": "Review terms carefully.",
+              "enabled": true
+            }
+          }
+        }
+        """,
+    )
+    draft = router.call("agent.send_message", {"message": "make a prompt"})[
+        "workspace"
+    ]["pending_draft"]
+
+    assert draft["kind"] == "create_prompt_preset"
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    assert applied["result"]["preset"]["kind"] == "glossary_review"
+    assert applied["result"]["preset"]["system_prompt"] == "Review terms carefully."
+
+
 def test_apply_draft_with_corrupted_cache_kind_raises(tmp_path: Path) -> None:
     """A hand-corrupted cache with an unsupported pending-draft kind is rejected."""
     import json

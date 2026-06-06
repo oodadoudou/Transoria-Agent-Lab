@@ -183,35 +183,6 @@ export function RecipesPage() {
 
       {error ? <div className={styles.error}>{error}</div> : null}
 
-      <Panel label={t.activeStageTitle} subtitle={t.activeStageSub}>
-        <div className={styles.stageSummary}>
-          {MODEL_SLOTS.map((slot) => {
-            const modelId = workspace?.stage_model_ids[slot] ?? null;
-            const profile = modelId ? profileLookup.get(modelId) : null;
-            return (
-              <div key={`m-${slot}`} className={styles.stageRow}>
-                <span className={styles.stageLabel}>{t.stageModel[slot]}</span>
-                <span className={styles.stageValue}>
-                  {profile?.display_name ?? t.stageEmptyModel}
-                </span>
-              </div>
-            );
-          })}
-          {PROMPT_SLOTS.map(({ slot }) => {
-            const promptId = workspace?.stage_prompt_ids[slot] ?? null;
-            const prompt = promptId ? promptLookup.get(promptId) : null;
-            return (
-              <div key={`p-${slot}`} className={styles.stageRow}>
-                <span className={styles.stageLabel}>{t.stagePrompt[slot]}</span>
-                <span className={styles.stageValue}>
-                  {formatPromptChoice(t, slot, prompt)}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      </Panel>
-
       <Panel label={t.recipesSectionTitle} subtitle={t.recipesSectionSub}>
         {workspace?.recipes.length ? (
           <div className={styles.recipeList}>

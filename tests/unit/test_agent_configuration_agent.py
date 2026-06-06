@@ -29,6 +29,33 @@ def test_parse_json_embedded_in_prose() -> None:
     assert draft is None
 
 
+def test_parse_embedded_draft_with_literal_newline_in_string() -> None:
+    content = '''
+    The proposal is:
+    {
+      "reply": "准备创建提示词。",
+      "draft": {
+        "kind": "create_prompt_preset",
+        "title": "创建文学翻译提示词",
+        "summary": "创建一套翻译提示词。",
+        "payload": {
+          "kind": "translation",
+          "name": "文学小说翻译预设",
+          "description": "文学翻译",
+          "system_prompt": "Role: 你是译者。
+最高准则：忠实原文。",
+          "enabled": true
+        }
+      }
+    }
+    '''
+    reply, draft = parse_agent_response(content)
+    assert reply == "准备创建提示词。"
+    assert draft is not None
+    assert draft.kind == "create_prompt_preset"
+    assert draft.payload["system_prompt"] == "Role: 你是译者。\n最高准则：忠实原文。"
+
+
 def test_parse_non_json_falls_back_to_text() -> None:
     reply, draft = parse_agent_response("just talking, no json here")
     assert reply == "just talking, no json here"
@@ -100,6 +127,8 @@ def test_system_prompt_documents_phase_b3_configuration_rules() -> None:
     assert "Read-only status questions do not need drafts" in AGENT_SYSTEM_PROMPT
     assert "create_model_profile" in AGENT_SYSTEM_PROMPT
     assert "update_model_profile" in AGENT_SYSTEM_PROMPT
+    assert "create_prompt_preset draft" in AGENT_SYSTEM_PROMPT
+    assert "Map term extraction to glossary" in AGENT_SYSTEM_PROMPT
     assert "weak model" in AGENT_SYSTEM_PROMPT
     assert "Never save API" in AGENT_SYSTEM_PROMPT
 

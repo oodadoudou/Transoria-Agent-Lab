@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { agentBridge } from "@/bridge/client";
 import type {
   AgentInventory,
@@ -43,6 +43,8 @@ export function ChatPage() {
   const [processExpanded, setProcessExpanded] = useState(false);
   const [adjustingDraft, setAdjustingDraft] = useState(false);
   const [draftAdjustment, setDraftAdjustment] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const messagesRef = useRef<HTMLDivElement | null>(null);
   const [expandedMessages, setExpandedMessages] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -78,21 +80,58 @@ export function ChatPage() {
     })();
   }, [t.loadFailed]);
 
-  const sendMessage = async () => {
-    const text = input.trim();
+  useEffect(() => {
+    const container = messagesRef.current;
+    if (!container) return;
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [busy, workspace?.messages.length, workspace?.pending_draft?.id]);
+
+  const sendText = async (rawText: string, restoreOnError = false) => {
+    const text = rawText.trim();
     if (!text) return;
     setBusy(true);
     setError(null);
-    setInput("");
+    if (restoreOnError) {
+      setInput("");
+    }
     try {
       applyResponse(await agentBridge.sendMessage(text));
     } catch (err) {
       setError(
         `${t.saveFailed} ${err instanceof Error ? err.message : ""}`.trim(),
       );
-      setInput(text);
+      if (restoreOnError) {
+        setInput(text);
+      }
     } finally {
       setBusy(false);
+    }
+  };
+
+  const sendMessage = async () => {
+    await sendText(input, true);
+  };
+
+  const resendMessage = (content: string) => {
+    void sendText(content);
+  };
+
+  const copyMessage = async (id: string, content: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(content);
+      } else {
+        fallbackCopy(content);
+      }
+      setCopiedMessageId(id);
+      window.setTimeout(() => {
+        setCopiedMessageId((current) => (current === id ? null : current));
+      }, 1400);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -264,27 +303,26 @@ export function ChatPage() {
                   <h2>{t.conversationsTitle}</h2>
                   <p>{t.conversationsSub}</p>
                 </div>
-                <div className={styles.headerActions}>
-                  <button
-                    type="button"
-                    className={styles.historyToggle}
-                    aria-label={t.collapseHistory}
-                    onClick={() =>
-                      setHistoryCollapsed((collapsed) => !collapsed)
-                    }
-                  >
-                    −
-                  </button>
-                  <Pill
-                    className={styles.newConversationButton}
-                    disabled={busy}
-                    onClick={() => void createConversation()}
-                    aria-label={t.newConversation}
-                  >
-                    +
-                  </Pill>
-                </div>
+                <button
+                  type="button"
+                  className={styles.historyToggle}
+                  aria-label={t.collapseHistory}
+                  onClick={() =>
+                    setHistoryCollapsed((collapsed) => !collapsed)
+                  }
+                >
+                  −
+                </button>
               </div>
+
+              <button
+                type="button"
+                className={styles.newConversationInline}
+                disabled={busy}
+                onClick={() => void createConversation()}
+              >
+                {t.newConversation}
+              </button>
 
               <div className={styles.convList}>
                 {(workspace?.conversations ?? []).map((conversation) => {
@@ -460,7 +498,7 @@ export function ChatPage() {
             </button>
           </div>
 
-          <div className={styles.messages}>
+          <div className={styles.messages} ref={messagesRef}>
             {(workspace?.messages ?? []).map((message) => {
               const isLong = message.content.length > COLLAPSE_MESSAGE_CHARS;
               const isExpanded = expandedMessages.has(message.id);
@@ -481,15 +519,37 @@ export function ChatPage() {
                 >
                   <div className={styles.messageRole}>{message.role}</div>
                   <div className={styles.messageBody}>{body}</div>
-                  {isLong ? (
+                  <div className={styles.messageActions}>
+                    {isLong ? (
+                      <button
+                        type="button"
+                        className={styles.messageActionButton}
+                        onClick={() => toggleMessageExpanded(message.id)}
+                      >
+                        {isExpanded ? t.collapseMessage : t.expandMessage}
+                      </button>
+                    ) : null}
+                    {message.role === "user" ? (
+                      <button
+                        type="button"
+                        className={styles.messageActionButton}
+                        disabled={busy}
+                        onClick={() => resendMessage(message.content)}
+                      >
+                        {t.resendMessage}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
-                      className={styles.expandMessageButton}
-                      onClick={() => toggleMessageExpanded(message.id)}
+                      className={styles.messageActionButton}
+                      disabled={busy}
+                      onClick={() => void copyMessage(message.id, message.content)}
                     >
-                      {isExpanded ? t.collapseMessage : t.expandMessage}
+                      {copiedMessageId === message.id
+                        ? t.copiedMessage
+                        : t.copyMessage}
                     </button>
-                  ) : null}
+                  </div>
                 </div>
               );
             })}
@@ -538,6 +598,7 @@ export function ChatPage() {
                 ) : null}
               </div>
             ) : null}
+            <div className={styles.messagesEnd} />
           </div>
 
           {workspace?.pending_draft ? (
@@ -749,6 +810,21 @@ export function ChatPage() {
       </div>
     </div>
   );
+}
+
+function fallbackCopy(text: string): void {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }
 
 function shortLabel(label: string): string {

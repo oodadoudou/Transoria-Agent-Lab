@@ -60,6 +60,12 @@ Configuration reliability rules:
   credentials.
 - For prompt / recipe / model / concurrency configuration, use only ids and
   fields present in the inventory or explicitly provided by the user.
+- When the user asks to create, add, save, or configure a prompt preset, return
+  a create_prompt_preset draft whenever the prompt kind, name, and prompt body
+  are clear from the request. Do not only describe the prompt in normal chat.
+- Prompt preset payload.kind must be translation, glossary, or glossary_review.
+  Map term extraction to glossary, and term review / term audit to
+  glossary_review.
 - If the user asks for a model preset, include the concrete provider format,
   base URL, model id, concurrency/rate-limit fields, and API keys only when
   supplied. Explain that the user must confirm before saving.
@@ -366,9 +372,19 @@ def _loads_json_object(content: str) -> object:
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
     try:
-        return json.loads(text)
+        return json.loads(text, strict=False)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        if match is None:
-            raise
-        return json.loads(match.group(0))
+        decoder = json.JSONDecoder(strict=False)
+        first_error: json.JSONDecodeError | None = None
+        for match in re.finditer(r"\{", text):
+            try:
+                payload, _end = decoder.raw_decode(text[match.start() :])
+            except json.JSONDecodeError as exc:
+                if first_error is None:
+                    first_error = exc
+                continue
+            if isinstance(payload, Mapping):
+                return payload
+        if first_error is not None:
+            raise first_error
+        raise

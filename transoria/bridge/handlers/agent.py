@@ -52,6 +52,18 @@ _PROMPT_KIND_BY_SLOT = {
     "term_review": PromptKind.GLOSSARY_REVIEW,
 }
 
+_PROMPT_KIND_ALIASES = {
+    "translation": PromptKind.TRANSLATION,
+    "translate": PromptKind.TRANSLATION,
+    "glossary": PromptKind.GLOSSARY,
+    "term_extract": PromptKind.GLOSSARY,
+    "term_extraction": PromptKind.GLOSSARY,
+    "glossary_extraction": PromptKind.GLOSSARY,
+    "glossary_review": PromptKind.GLOSSARY_REVIEW,
+    "term_review": PromptKind.GLOSSARY_REVIEW,
+    "term_audit": PromptKind.GLOSSARY_REVIEW,
+}
+
 _MAX_TITLE_LENGTH = 120
 _MAX_CONTEXT_MESSAGES = 20
 _MAX_RECIPE_NAME_LENGTH = 120
@@ -1569,16 +1581,15 @@ def _resolve_prompt_for_update(
 def _coerce_prompt_preset_payload(
     payload: Mapping[str, object],
 ) -> tuple[PromptKind, str, str, str, bool]:
-    raw_kind = str(payload.get("kind") or "")
-    try:
-        kind = PromptKind(raw_kind)
-    except ValueError as exc:
+    raw_kind = str(payload.get("kind") or "").strip()
+    kind = _PROMPT_KIND_ALIASES.get(raw_kind)
+    if kind is None:
         raise BridgeError.invalid_argument(
             "prompt kind must be translation, glossary, or glossary_review.",
             field="kind",
-        ) from exc
+        )
     name = str(payload.get("name") or "").strip()
-    system_prompt = str(payload.get("system_prompt") or "").strip()
+    system_prompt = _prompt_body_from_payload(payload)
     if not name:
         raise BridgeError.invalid_argument("name is required.", field="name")
     if not system_prompt:
@@ -1593,6 +1604,14 @@ def _coerce_prompt_preset_payload(
         system_prompt,
         bool(payload.get("enabled", True)),
     )
+
+
+def _prompt_body_from_payload(payload: Mapping[str, object]) -> str:
+    for key in ("system_prompt", "systemPrompt", "prompt", "content", "body"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _coerce_recipe_update_payload(

@@ -52,22 +52,6 @@
   align-items: center;
 }
 
-.headerActions {
-  display: flex;
-  gap: 8px;
-  align-items: flex-end;
-}
-
-.newConversationButton {
-  width: 30px;
-  min-width: 30px;
-  height: 30px;
-  padding: 0;
-  border-radius: 50%;
-  font-size: 18px;
-  line-height: 1;
-}
-
 .historyToggle {
   display: inline-flex;
   width: 28px;
@@ -95,6 +79,28 @@
   writing-mode: horizontal-tb;
   text-orientation: mixed;
   padding: 0;
+}
+
+.newConversationInline {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--ink);
+  color: #fff;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: var(--shadow-soft);
+}
+
+.newConversationInline:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .collapsedCount {
@@ -340,6 +346,10 @@
   padding: 10px 4px 10px 0;
 }
 
+.messagesEnd {
+  flex: 0 0 1px;
+}
+
 .message {
   max-width: min(760px, 88%);
   border: 1px solid var(--hairline);
@@ -440,8 +450,14 @@
   font-size: 13px;
 }
 
-.expandMessageButton {
+.messageActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-top: 8px;
+}
+
+.messageActionButton {
   border: 0;
   background: transparent;
   color: var(--accent, #5b6cff);
@@ -452,8 +468,13 @@
   cursor: pointer;
 }
 
-.expandMessageButton:hover {
+.messageActionButton:hover:not(:disabled) {
   text-decoration: underline;
+}
+
+.messageActionButton:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .quickActions {

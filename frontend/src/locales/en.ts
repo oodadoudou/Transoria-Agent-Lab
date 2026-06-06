@@ -662,6 +662,9 @@ export const en: Messages = {
       "This shows visible agent processing status, not hidden model reasoning.",
     expandMessage: "Show more",
     collapseMessage: "Show less",
+    resendMessage: "Resend",
+    copyMessage: "Copy",
+    copiedMessage: "Copied",
     activeRecipeTitle: "Active recipe",
     activeRecipeSub:
       "Tasks the agent starts will use the stage model + prompt combination shown below.",

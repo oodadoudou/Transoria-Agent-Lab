@@ -399,6 +399,9 @@ export interface Messages {
     processDisclosure: string;
     expandMessage: string;
     collapseMessage: string;
+    resendMessage: string;
+    copyMessage: string;
+    copiedMessage: string;
     activeRecipeTitle: string;
     activeRecipeSub: string;
     activeRecipeNone: string;
