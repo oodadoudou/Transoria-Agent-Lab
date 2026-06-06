@@ -979,17 +979,16 @@ def _direct_prompt_preset_response(
 ) -> tuple[str, AgentActionDraft | None] | None:
     if not _looks_like_direct_prompt_preset_request(user_message):
         return None
+    name = _extract_prompt_create_name(user_message)
+    if not name:
+        return None
+    if not _has_prompt_creation_requirements(user_message):
+        return None
     try:
         prompt_kind = _coerce_prompt_kind(None, fallback_text=user_message)
     except BridgeError:
         return (
             "我理解你想创建 Prompt 预设，但还不清楚它属于哪个阶段。请说明是翻译、术语提取还是术语审查 Prompt。",
-            None,
-        )
-    name = _extract_prompt_create_name(user_message)
-    if not name:
-        return (
-            "我理解你想创建 Prompt 预设，但还缺预设名称。请告诉我这个 Prompt 要叫什么。",
             None,
         )
     system_prompt = _extract_prompt_body_from_request(user_message)
@@ -1009,7 +1008,7 @@ def _direct_prompt_preset_response(
     draft = AgentActionDraft.create(
         kind="create_prompt_preset",
         title=title,
-        summary=f"创建一套 { _prompt_kind_label(prompt_kind) } Prompt 预设：{name}。",
+        summary=f"创建一套 {_prompt_kind_label(prompt_kind)} Prompt 预设：{name}。",
         payload=payload,
     )
     return (
@@ -1018,6 +1017,25 @@ def _direct_prompt_preset_response(
             "请检查内容，确认后才会写入 Prompt 配置。"
         ),
         draft,
+    )
+
+
+def _has_prompt_creation_requirements(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "要求",
+            "规则",
+            "内容",
+            "正文",
+            "强调",
+            "用于",
+            "适合",
+            "风格",
+            "规范",
+            "保留",
+            "禁止",
+        )
     )
 
 

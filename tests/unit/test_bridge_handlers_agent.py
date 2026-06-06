@@ -2204,6 +2204,41 @@ def test_agent_directly_drafts_common_compound_config_request(
     )
 
 
+def test_agent_directly_drafts_prompt_preset_create_request(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "请创建一套术语审查 Prompt，名字叫「小说术语审查预设」，"
+                "要求强调人名与组织一致性、性别属性继承和 ABO 规范。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "create_prompt_preset"
+    assert draft["payload"]["kind"] == "glossary_review"
+    assert draft["payload"]["name"] == "小说术语审查预设"
+    assert "ABO" in draft["payload"]["system_prompt"]
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    preset = applied["result"]["preset"]
+    assert preset["kind"] == "glossary_review"
+    assert preset["name"] == "小说术语审查预设"
+
+
 def test_agent_salvages_malformed_compound_draft_from_chinese_request(
     tmp_path: Path,
 ) -> None:
