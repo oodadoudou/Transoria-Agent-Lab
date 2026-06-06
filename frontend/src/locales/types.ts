@@ -10,6 +10,7 @@ export interface Messages {
     glossary: string;
     glossaryReview: string;
     generalTools: string;
+    agentLab: string;
     appSettings: string;
     githubLink: string;
     githubFace: string;
@@ -322,9 +323,52 @@ export interface Messages {
       epubConvert: string;
       epubMetadata: string;
     };
+    agentLab: {
+      workspace: string;
+    };
     appSettings: {
       general: string;
     };
+  };
+  agentLab: {
+    crumb: string;
+    title: string;
+    sub: string;
+    configTitle: string;
+    configSub: string;
+    workflowModel: string;
+    translationModel: string;
+    termExtractModel: string;
+    termReviewModel: string;
+    translationPrompt: string;
+    termExtractPrompt: string;
+    termReviewPrompt: string;
+    noModel: string;
+    noPrompt: string;
+    modelNotConfigured: string;
+    chatTitle: string;
+    chatSub: string;
+    inputPlaceholder: string;
+    send: string;
+    sending: string;
+    draftTitle: string;
+    draftSub: string;
+    applyDraft: string;
+    discardDraft: string;
+    noDraft: string;
+    inventoryTitle: string;
+    inventorySub: string;
+    concurrency: string;
+    rpm: string;
+    tpm: string;
+    retry: string;
+    loadFailed: string;
+    saveFailed: string;
+    draftPayload: string;
+    confirmationBoundary: string;
+    memoryTitle: string;
+    memorySub: string;
+    memoryEmpty: string;
   };
   translation: {
     crumb: string;

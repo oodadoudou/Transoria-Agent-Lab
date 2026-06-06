@@ -85,6 +85,11 @@ function buildTree(messages: ReturnType<typeof useMessages>): {
     ],
     workspace: [
       {
+        id: "agent-lab",
+        label: messages.rail.agentLab,
+        children: null,
+      },
+      {
         id: "app-settings",
         label: messages.rail.appSettings,
         children: null,
@@ -126,6 +131,7 @@ function isModuleId(value: unknown): value is ModuleId {
     value === "glossary" ||
     value === "glossary-review" ||
     value === "general-tools" ||
+    value === "agent-lab" ||
     value === "app-settings"
   );
 }

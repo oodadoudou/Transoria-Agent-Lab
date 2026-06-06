@@ -11,6 +11,7 @@ import { TranslationModule } from "./pages/translation";
 import { GlossaryModule } from "./pages/glossary";
 import { GlossaryReviewModule } from "./pages/glossary-review";
 import { GeneralToolsModule } from "./pages/general-tools";
+import { AgentLabModule } from "./pages/agent-lab";
 import { AppSettingsModule } from "./pages/app-settings";
 import { AllKeysFailedDialog } from "./components/AllKeysFailedDialog";
 import { ToastHost } from "./components/ToastHost";
@@ -103,6 +104,8 @@ function PageBody({ route }: { route: Route }) {
       return <GlossaryReviewModule page={route.page} />;
     case "general-tools":
       return <GeneralToolsModule page={route.page} />;
+    case "agent-lab":
+      return <AgentLabModule page={route.page} />;
     case "app-settings":
       return <AppSettingsModule page={route.page} />;
   }

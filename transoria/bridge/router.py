@@ -108,6 +108,7 @@ def build_default_router(
     from transoria.app_paths import default_cache_root  # noqa: PLC0415
     from transoria.bridge.handlers.app import register as register_app
     from transoria.bridge.handlers.app import _read_app_version  # noqa: PLC0415
+    from transoria.bridge.handlers.agent import register as register_agent  # noqa: PLC0415
     from transoria.bridge.handlers.dialogs import (  # noqa: PLC0415
         NullDialogProvider,
         register as register_dialogs,
@@ -193,6 +194,12 @@ def build_default_router(
 
     router = BridgeRouter()
     register_app(router)
+    register_agent(
+        router,
+        cache_root=cache_root,
+        profile_store=profile_store,
+        llm_client_factory=proxy_aware_factory,
+    )
     register_tasks(router, service=task_service)
     register_settings(router, store=settings_store)
     register_model_profiles(

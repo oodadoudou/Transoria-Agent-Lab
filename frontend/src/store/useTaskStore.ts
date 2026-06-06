@@ -6,6 +6,7 @@ export type ModuleId =
   | "glossary"
   | "glossary-review"
   | "general-tools"
+  | "agent-lab"
   | "app-settings";
 
 export type TranslationPage =
@@ -41,12 +42,15 @@ export type AppSettingsPage = "general";
 
 export type ModelPage = "general";
 
+export type AgentLabPage = "workspace";
+
 export type Route =
   | { module: "model"; page: ModelPage }
   | { module: "translation"; page: TranslationPage }
   | { module: "glossary"; page: GlossaryPage }
   | { module: "glossary-review"; page: GlossaryReviewPage }
   | { module: "general-tools"; page: GeneralToolsPage }
+  | { module: "agent-lab"; page: AgentLabPage }
   | { module: "app-settings"; page: AppSettingsPage };
 
 export function isRunPage(route: Route): boolean {
@@ -69,6 +73,8 @@ export function defaultPageFor(module: ModuleId): Route {
       return { module: "glossary-review", page: "run" };
     case "general-tools":
       return { module: "general-tools", page: "batchReplacement" };
+    case "agent-lab":
+      return { module: "agent-lab", page: "workspace" };
     case "app-settings":
       return { module: "app-settings", page: "general" };
   }
@@ -142,6 +148,8 @@ function coerceRoute(value: unknown): Route {
         };
       }
       return { module: "general-tools", page: "batchReplacement" };
+    case "agent-lab":
+      return { module: "agent-lab", page: "workspace" };
     case "app-settings":
       return { module: "app-settings", page: "general" };
     default:

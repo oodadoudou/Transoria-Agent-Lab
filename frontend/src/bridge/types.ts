@@ -60,6 +60,76 @@ export type SettingsModule =
 
 export type PromptKind = "translation" | "glossary" | "glossary_review";
 
+export type AgentMessageRole = "user" | "assistant" | "system";
+
+export type AgentDraftStatus = "pending" | "applied" | "discarded";
+
+export type AgentModelSlot = "translation" | "term_extract" | "term_review";
+
+export type AgentPromptSlot = "translation" | "term_extract" | "term_review";
+
+export interface AgentMessage {
+  id: string;
+  role: AgentMessageRole;
+  content: string;
+  created_at: string;
+}
+
+export interface AgentActionDraft {
+  id: string;
+  kind: string;
+  title: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  status: AgentDraftStatus;
+  created_at: string;
+}
+
+export interface AgentWorkspace {
+  workflow_model_id: string | null;
+  stage_model_ids: Record<AgentModelSlot, string | null>;
+  stage_prompt_ids: Record<AgentPromptSlot, string | null>;
+  messages: AgentMessage[];
+  memories: string[];
+  pending_draft: AgentActionDraft | null;
+  draft_history: AgentActionDraft[];
+  updated_at: string;
+}
+
+export interface AgentInventoryProfile {
+  id: string;
+  display_name: string;
+  provider_format: ProviderFormat;
+  model_id: string;
+  api_key_configured: boolean;
+  thinking_level: ThinkingLevel;
+  max_output_tokens: number;
+  input_token_limit: number;
+  concurrency_limit: number;
+  rpm_limit: number;
+  tpm_limit: number;
+  retry_attempts: number;
+}
+
+export interface AgentInventoryPrompt {
+  id: string;
+  name: string;
+  kind: PromptKind;
+  description: string;
+  is_system: boolean;
+}
+
+export interface AgentInventory {
+  profiles: AgentInventoryProfile[];
+  prompts: Record<PromptKind, AgentInventoryPrompt[]>;
+}
+
+export interface AgentWorkspaceResponse {
+  workspace: AgentWorkspace;
+  inventory: AgentInventory;
+  result?: Record<string, unknown>;
+}
+
 export interface AppMetadata {
   app_version: string;
   platform: Platform;

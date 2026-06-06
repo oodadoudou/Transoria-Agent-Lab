@@ -2,6 +2,8 @@ import { getTransport } from "./transport";
 import { nativeDialogs } from "./native";
 import type {
   AllSettings,
+  AgentWorkspace,
+  AgentWorkspaceResponse,
   AppMetadata,
   AppSettings,
   DialogPathResult,
@@ -247,6 +249,28 @@ export const promptsBridge = {
   },
   resetToDefault(id: string): Promise<{ preset: PromptPresetBody }> {
     return call("prompts.reset_to_default", { id });
+  },
+};
+
+export const agentBridge = {
+  readWorkspace(): Promise<AgentWorkspaceResponse> {
+    return call("agent.read_workspace");
+  },
+  updateWorkspace(
+    patch: Partial<
+      Pick<AgentWorkspace, "workflow_model_id" | "stage_model_ids" | "stage_prompt_ids">
+    >,
+  ): Promise<AgentWorkspaceResponse> {
+    return call("agent.update_workspace", { patch });
+  },
+  sendMessage(message: string): Promise<AgentWorkspaceResponse> {
+    return call("agent.send_message", { message });
+  },
+  applyDraft(draftId: string): Promise<AgentWorkspaceResponse> {
+    return call("agent.apply_draft", { draft_id: draftId });
+  },
+  discardDraft(draftId: string): Promise<AgentWorkspaceResponse> {
+    return call("agent.discard_draft", { draft_id: draftId });
   },
 };
 

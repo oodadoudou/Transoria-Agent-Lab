@@ -1,0 +1,361 @@
+import { useEffect, useMemo, useState } from "react";
+import { agentBridge } from "@/bridge/client";
+import type {
+  AgentInventory,
+  AgentInventoryPrompt,
+  AgentModelSlot,
+  AgentPromptSlot,
+  AgentWorkspace,
+  PromptKind,
+} from "@/bridge/types";
+import { Panel } from "@/components/Panel";
+import { Pill } from "@/components/Pill";
+import { useMessages } from "@/locales";
+import styles from "./WorkspacePage.module.css";
+
+const MODEL_SLOTS: Array<{ slot: AgentModelSlot; labelKey: string }> = [
+  { slot: "translation", labelKey: "translationModel" },
+  { slot: "term_extract", labelKey: "termExtractModel" },
+  { slot: "term_review", labelKey: "termReviewModel" },
+];
+
+const PROMPT_SLOTS: Array<{
+  slot: AgentPromptSlot;
+  labelKey: string;
+  kind: PromptKind;
+}> = [
+  { slot: "translation", labelKey: "translationPrompt", kind: "translation" },
+  { slot: "term_extract", labelKey: "termExtractPrompt", kind: "glossary" },
+  {
+    slot: "term_review",
+    labelKey: "termReviewPrompt",
+    kind: "glossary_review",
+  },
+];
+
+const EMPTY_MODEL_SLOTS: Record<AgentModelSlot, string | null> = {
+  translation: null,
+  term_extract: null,
+  term_review: null,
+};
+
+const EMPTY_PROMPT_SLOTS: Record<AgentPromptSlot, string | null> = {
+  translation: null,
+  term_extract: null,
+  term_review: null,
+};
+
+export function WorkspacePage() {
+  const messages = useMessages();
+  const t = messages.agentLab;
+  const [workspace, setWorkspace] = useState<AgentWorkspace | null>(null);
+  const [inventory, setInventory] = useState<AgentInventory | null>(null);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = async () => {
+    const response = await agentBridge.readWorkspace();
+    setWorkspace(response.workspace);
+    setInventory(response.inventory);
+  };
+
+  useEffect(() => {
+    void load().catch((err: unknown) => {
+      setError(`${t.loadFailed} ${err instanceof Error ? err.message : ""}`.trim());
+    });
+  }, [t.loadFailed]);
+
+  const updateWorkspace = async (
+    patch: Partial<
+      Pick<AgentWorkspace, "workflow_model_id" | "stage_model_ids" | "stage_prompt_ids">
+    >,
+  ) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await agentBridge.updateWorkspace(patch);
+      setWorkspace(response.workspace);
+      setInventory(response.inventory);
+    } catch (err) {
+      setError(`${t.saveFailed} ${err instanceof Error ? err.message : ""}`.trim());
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendMessage = async () => {
+    const text = input.trim();
+    if (!text) return;
+    setBusy(true);
+    setError(null);
+    setInput("");
+    try {
+      const response = await agentBridge.sendMessage(text);
+      setWorkspace(response.workspace);
+      setInventory(response.inventory);
+    } catch (err) {
+      setError(`${t.saveFailed} ${err instanceof Error ? err.message : ""}`.trim());
+      setInput(text);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyDraft = async () => {
+    if (!workspace?.pending_draft) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await agentBridge.applyDraft(workspace.pending_draft.id);
+      setWorkspace(response.workspace);
+      setInventory(response.inventory);
+    } catch (err) {
+      setError(`${t.saveFailed} ${err instanceof Error ? err.message : ""}`.trim());
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const discardDraft = async () => {
+    if (!workspace?.pending_draft) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await agentBridge.discardDraft(workspace.pending_draft.id);
+      setWorkspace(response.workspace);
+      setInventory(response.inventory);
+    } catch (err) {
+      setError(`${t.saveFailed} ${err instanceof Error ? err.message : ""}`.trim());
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const promptOptions = useMemo(() => {
+    const empty: Record<PromptKind, AgentInventoryPrompt[]> = {
+      translation: [],
+      glossary: [],
+      glossary_review: [],
+    };
+    if (!inventory) return empty;
+    return {
+      ...empty,
+      ...inventory.prompts,
+    };
+  }, [inventory]);
+
+  return (
+    <div className={styles.page}>
+      <div className={styles.header}>
+        <div>
+          <h1>{t.title}</h1>
+          <p>{t.sub}</p>
+        </div>
+      </div>
+
+      {error ? <div className={styles.error}>{error}</div> : null}
+
+      <div className={styles.grid}>
+        <Panel label={t.configTitle} subtitle={t.configSub}>
+          <div className={styles.stack}>
+            <SelectField
+              label={t.workflowModel}
+              value={workspace?.workflow_model_id ?? ""}
+              emptyLabel={t.noModel}
+              disabled={busy || !workspace || !inventory}
+              options={(inventory?.profiles ?? []).map((profile) => ({
+                value: profile.id,
+                label: formatProfile(profile.display_name, profile.api_key_configured, t.modelNotConfigured),
+              }))}
+              onChange={(value) =>
+                void updateWorkspace({ workflow_model_id: value || null })
+              }
+            />
+
+            <div className={styles.boundary}>{t.confirmationBoundary}</div>
+
+            {MODEL_SLOTS.map(({ slot, labelKey }) => (
+              <SelectField
+                key={slot}
+                label={t[labelKey as keyof typeof t] as string}
+                value={workspace?.stage_model_ids[slot] ?? ""}
+                emptyLabel={t.noModel}
+                disabled={busy || !workspace || !inventory}
+                options={(inventory?.profiles ?? []).map((profile) => ({
+                  value: profile.id,
+                  label: formatProfile(profile.display_name, profile.api_key_configured, t.modelNotConfigured),
+                }))}
+                onChange={(value) =>
+                  void updateWorkspace({
+                    stage_model_ids: {
+                      ...(workspace?.stage_model_ids ?? EMPTY_MODEL_SLOTS),
+                      [slot]: value || null,
+                    },
+                  })
+                }
+              />
+            ))}
+
+            {PROMPT_SLOTS.map(({ slot, labelKey, kind }) => (
+              <SelectField
+                key={slot}
+                label={t[labelKey as keyof typeof t] as string}
+                value={workspace?.stage_prompt_ids[slot] ?? ""}
+                emptyLabel={t.noPrompt}
+                disabled={busy || !workspace || !inventory}
+                options={promptOptions[kind].map((prompt) => ({
+                  value: prompt.id,
+                  label: prompt.name,
+                }))}
+                onChange={(value) =>
+                  void updateWorkspace({
+                    stage_prompt_ids: {
+                      ...(workspace?.stage_prompt_ids ?? EMPTY_PROMPT_SLOTS),
+                      [slot]: value || null,
+                    },
+                  })
+                }
+              />
+            ))}
+          </div>
+        </Panel>
+
+        <Panel label={t.chatTitle} subtitle={t.chatSub} className={styles.chatPanel}>
+          <div className={styles.messages}>
+            {(workspace?.messages ?? []).map((message) => (
+              <div
+                key={message.id}
+                className={`${styles.message} ${
+                  message.role === "user" ? styles.userMessage : styles.agentMessage
+                }`}
+              >
+                <div className={styles.messageRole}>{message.role}</div>
+                <div className={styles.messageBody}>{message.content}</div>
+              </div>
+            ))}
+          </div>
+          <div className={styles.composer}>
+            <textarea
+              value={input}
+              placeholder={t.inputPlaceholder}
+              disabled={busy}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  void sendMessage();
+                }
+              }}
+            />
+            <Pill disabled={busy || !input.trim()} onClick={() => void sendMessage()}>
+              {busy ? t.sending : t.send}
+            </Pill>
+          </div>
+        </Panel>
+
+        <div className={styles.sideStack}>
+          <Panel label={t.draftTitle} subtitle={t.draftSub}>
+            {workspace?.pending_draft ? (
+              <div className={styles.draft}>
+                <h3>{workspace.pending_draft.title}</h3>
+                <p>{workspace.pending_draft.summary}</p>
+                <div className={styles.payloadLabel}>{t.draftPayload}</div>
+                <pre>{JSON.stringify(workspace.pending_draft.payload, null, 2)}</pre>
+                <div className={styles.actions}>
+                  <Pill disabled={busy} onClick={() => void applyDraft()}>
+                    {t.applyDraft}
+                  </Pill>
+                  <Pill
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => void discardDraft()}
+                  >
+                    {t.discardDraft}
+                  </Pill>
+                </div>
+              </div>
+            ) : (
+              <div className={styles.empty}>{t.noDraft}</div>
+            )}
+          </Panel>
+
+          <Panel label={t.memoryTitle} subtitle={t.memorySub}>
+            {workspace?.memories.length ? (
+              <ul className={styles.memoryList}>
+                {workspace.memories.map((memory) => (
+                  <li key={memory}>{memory}</li>
+                ))}
+              </ul>
+            ) : (
+              <div className={styles.empty}>{t.memoryEmpty}</div>
+            )}
+          </Panel>
+
+          <Panel label={t.inventoryTitle} subtitle={t.inventorySub}>
+            <div className={styles.profileList}>
+              {(inventory?.profiles ?? []).map((profile) => (
+                <div key={profile.id} className={styles.profile}>
+                  <div className={styles.profileName}>{profile.display_name}</div>
+                  <div className={styles.profileMeta}>{profile.model_id}</div>
+                  <div className={styles.limits}>
+                    <span>
+                      {t.concurrency}: {profile.concurrency_limit}
+                    </span>
+                    <span>
+                      {t.rpm}: {profile.rpm_limit}
+                    </span>
+                    <span>
+                      {t.tpm}: {profile.tpm_limit}
+                    </span>
+                    <span>
+                      {t.retry}: {profile.retry_attempts}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SelectField({
+  label,
+  value,
+  emptyLabel,
+  disabled,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  emptyLabel: string;
+  disabled: boolean;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className={styles.selectField}>
+      <span>{label}</span>
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        <option value="">{emptyLabel}</option>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function formatProfile(name: string, configured: boolean, missingLabel: string) {
+  return configured ? name : `${name} (${missingLabel})`;
+}

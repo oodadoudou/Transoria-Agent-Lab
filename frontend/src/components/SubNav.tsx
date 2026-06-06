@@ -159,6 +159,11 @@ export function crumbFor(
         module: messages.generalTools.crumb,
         page: messages.pages.generalTools[route.page],
       };
+    case "agent-lab":
+      return {
+        module: messages.agentLab.crumb,
+        page: messages.pages.agentLab[route.page],
+      };
     case "app-settings":
       return {
         module: messages.appSettings.crumb,
