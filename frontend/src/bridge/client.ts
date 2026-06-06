@@ -326,6 +326,12 @@ export const agentBridge = {
   discardDraft(draftId: string): Promise<AgentWorkspaceResponse> {
     return call("agent.discard_draft", { draft_id: draftId });
   },
+  reviseDraft(
+    draftId: string,
+    adjustment: string,
+  ): Promise<AgentWorkspaceResponse> {
+    return call("agent.revise_draft", { draft_id: draftId, adjustment });
+  },
   createConversation(title?: string): Promise<AgentWorkspaceResponse> {
     return call("agent.create_conversation", title ? { title } : {});
   },

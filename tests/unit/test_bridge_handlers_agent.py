@@ -19,6 +19,8 @@ from transoria.model_profiles import ModelProfileStore
 from transoria.prompts import (
     DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
     DEFAULT_TRANSLATION_PRESET_ID,
+    PromptKind,
+    PromptPresetStore,
 )
 from transoria.runtime.task_record import TaskRecord
 from transoria.runtime.cache import TaskCache
@@ -45,6 +47,20 @@ class FakeAgentClient:
         self.requests.append(request)
         return ChatResponse(
             content=self.content,
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
+
+class SequenceAgentClient:
+    def __init__(self, contents: list[str]) -> None:
+        self.contents = list(contents)
+        self.requests: list[ChatRequest] = []
+
+    async def chat(self, request: ChatRequest) -> ChatResponse:
+        self.requests.append(request)
+        content = self.contents.pop(0)
+        return ChatResponse(
+            content=content,
             usage=TokenUsage(input_tokens=1, output_tokens=1),
         )
 
@@ -1627,6 +1643,126 @@ def test_pending_draft_persists_across_reload(tmp_path: Path) -> None:
 
     reloaded = router.call("agent.read_workspace", {})["workspace"]
     assert reloaded["pending_draft"]["id"] == draft["id"]
+
+
+def test_revise_draft_replaces_pending_without_applying(tmp_path: Path) -> None:
+    _seed_profile(tmp_path)
+    fake = SequenceAgentClient(
+        [
+            """
+            {
+              "reply": "Drafting.",
+              "draft": {
+                "kind": "create_prompt_preset",
+                "title": "Create prompt",
+                "summary": "Create first prompt.",
+                "payload": {
+                  "kind": "translation",
+                  "name": "First",
+                  "description": "first",
+                  "system_prompt": "First prompt body.",
+                  "enabled": true
+                }
+              }
+            }
+            """,
+            """
+            {
+              "reply": "I revised the draft.",
+              "draft": {
+                "kind": "create_prompt_preset",
+                "title": "Create renamed prompt",
+                "summary": "Create renamed prompt.",
+                "payload": {
+                  "kind": "translation",
+                  "name": "Renamed",
+                  "description": "renamed",
+                  "system_prompt": "Renamed prompt body.",
+                  "enabled": true
+                }
+              }
+            }
+            """,
+        ]
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+    original = router.call("agent.send_message", {"message": "make prompt"})[
+        "workspace"
+    ]["pending_draft"]
+
+    revised = router.call(
+        "agent.revise_draft",
+        {"draft_id": original["id"], "adjustment": "把名称改成 Renamed"},
+    )["workspace"]
+
+    assert revised["pending_draft"]["id"] != original["id"]
+    assert revised["pending_draft"]["payload"]["name"] == "Renamed"
+    assert revised["draft_history"][-1]["id"] == original["id"]
+    assert revised["draft_history"][-1]["status"] == "discarded"
+    saved_names = {
+        preset.name
+        for preset in PromptPresetStore(
+            path=tmp_path / "prompts.translation.json",
+            kind=PromptKind.TRANSLATION,
+        ).load()
+    }
+    assert "First" not in saved_names
+    assert "Renamed" not in saved_names
+    assert "Current pending draft" in fake.requests[-1].user_prompt
+
+
+def test_revise_draft_keeps_original_when_model_returns_no_draft(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = SequenceAgentClient(
+        [
+            """
+            {
+              "reply": "Drafting.",
+              "draft": {
+                "kind": "create_prompt_preset",
+                "title": "Create prompt",
+                "summary": "Create first prompt.",
+                "payload": {
+                  "kind": "translation",
+                  "name": "First",
+                  "description": "first",
+                  "system_prompt": "First prompt body.",
+                  "enabled": true
+                }
+              }
+            }
+            """,
+            """
+            {
+              "reply": "请说明要怎么调整这个草案。",
+              "draft": null
+            }
+            """,
+        ]
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+    original = router.call("agent.send_message", {"message": "make prompt"})[
+        "workspace"
+    ]["pending_draft"]
+
+    revised = router.call(
+        "agent.revise_draft",
+        {"draft_id": original["id"], "adjustment": "随便调整一下"},
+    )["workspace"]
+
+    assert revised["pending_draft"]["id"] == original["id"]
+    assert revised["pending_draft"]["payload"]["name"] == "First"
+    assert revised["draft_history"] == []
 
 
 def test_apply_recipe_fails_after_referenced_profile_deleted(tmp_path: Path) -> None:

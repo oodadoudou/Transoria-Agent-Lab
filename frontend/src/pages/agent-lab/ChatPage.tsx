@@ -40,6 +40,9 @@ export function ChatPage() {
   const [modelOpen, setModelOpen] = useState(false);
   const [recipeOpen, setRecipeOpen] = useState(false);
   const [reasoningOpen, setReasoningOpen] = useState(false);
+  const [processExpanded, setProcessExpanded] = useState(false);
+  const [adjustingDraft, setAdjustingDraft] = useState(false);
+  const [draftAdjustment, setDraftAdjustment] = useState("");
   const [expandedMessages, setExpandedMessages] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -95,12 +98,36 @@ export function ChatPage() {
 
   const applyDraft = () => {
     if (!workspace?.pending_draft) return;
+    setAdjustingDraft(false);
+    setDraftAdjustment("");
     void run(() => agentBridge.applyDraft(workspace.pending_draft!.id));
   };
 
   const discardDraft = () => {
     if (!workspace?.pending_draft) return;
+    setAdjustingDraft(false);
+    setDraftAdjustment("");
     void run(() => agentBridge.discardDraft(workspace.pending_draft!.id));
+  };
+
+  const startAdjustDraft = () => {
+    if (!workspace?.pending_draft) return;
+    setAdjustingDraft(true);
+    setDraftAdjustment("");
+  };
+
+  const cancelDraftAdjustment = () => {
+    setAdjustingDraft(false);
+    setDraftAdjustment("");
+  };
+
+  const submitDraftAdjustment = async () => {
+    const adjustment = draftAdjustment.trim();
+    if (!workspace?.pending_draft || !adjustment) return;
+    const draftId = workspace.pending_draft.id;
+    setAdjustingDraft(false);
+    setDraftAdjustment("");
+    await run(() => agentBridge.reviseDraft(draftId, adjustment));
   };
 
   const createConversation = () => run(() => agentBridge.createConversation());
@@ -221,9 +248,10 @@ export function ChatPage() {
               <button
                 type="button"
                 className={styles.historyToggle}
-                onClick={() => setHistoryCollapsed(false)}
+                aria-label={t.expandHistory}
+                onClick={() => setHistoryCollapsed((collapsed) => !collapsed)}
               >
-                {t.expandHistory}
+                +
               </button>
               <span className={styles.collapsedCount}>
                 {workspace?.conversations.length ?? 0}
@@ -240,9 +268,12 @@ export function ChatPage() {
                   <button
                     type="button"
                     className={styles.historyToggle}
-                    onClick={() => setHistoryCollapsed(true)}
+                    aria-label={t.collapseHistory}
+                    onClick={() =>
+                      setHistoryCollapsed((collapsed) => !collapsed)
+                    }
                   >
-                    {t.collapseHistory}
+                    −
                   </button>
                   <Pill
                     className={styles.newConversationButton}
@@ -486,11 +517,25 @@ export function ChatPage() {
                   <span className={styles.spinner} aria-hidden="true" />
                   <span>{t.thinkingLead}</span>
                 </div>
-                <div className={styles.thinkingSteps}>
-                  {t.thinkingSteps.map((step) => (
-                    <span key={step}>{step}</span>
-                  ))}
-                </div>
+                <button
+                  type="button"
+                  className={styles.processToggle}
+                  onClick={() => setProcessExpanded((expanded) => !expanded)}
+                >
+                  {processExpanded ? t.hideProcessDetails : t.showProcessDetails}
+                </button>
+                {processExpanded ? (
+                  <>
+                    <div className={styles.thinkingSteps}>
+                      {t.thinkingSteps.map((step) => (
+                        <span key={step}>{step}</span>
+                      ))}
+                    </div>
+                    <p className={styles.processDisclosure}>
+                      {t.processDisclosure}
+                    </p>
+                  </>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -510,7 +555,50 @@ export function ChatPage() {
                 <Pill variant="ghost" disabled={busy} onClick={discardDraft}>
                   {t.discardDraft}
                 </Pill>
+                <Pill variant="ghost" disabled={busy} onClick={startAdjustDraft}>
+                  {t.adjustDraft}
+                </Pill>
               </div>
+              {adjustingDraft ? (
+                <div className={styles.adjustBox}>
+                  <label htmlFor="agent-draft-adjustment">
+                    {t.adjustDraftTitle}
+                  </label>
+                  <textarea
+                    id="agent-draft-adjustment"
+                    value={draftAdjustment}
+                    autoFocus
+                    placeholder={t.adjustDraftPlaceholder}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setDraftAdjustment(event.target.value)
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") return;
+                      if (event.shiftKey || event.nativeEvent.isComposing) {
+                        return;
+                      }
+                      event.preventDefault();
+                      void submitDraftAdjustment();
+                    }}
+                  />
+                  <div className={styles.adjustActions}>
+                    <Pill
+                      disabled={busy || !draftAdjustment.trim()}
+                      onClick={() => void submitDraftAdjustment()}
+                    >
+                      {t.submitAdjustment}
+                    </Pill>
+                    <Pill
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={cancelDraftAdjustment}
+                    >
+                      {t.cancelAdjustment}
+                    </Pill>
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
 
@@ -665,8 +753,8 @@ export function ChatPage() {
 
 function shortLabel(label: string): string {
   const trimmed = label.trim();
-  if (trimmed.length <= 18) return trimmed;
-  return `${trimmed.slice(0, 17)}…`;
+  if (trimmed.length <= 14) return trimmed;
+  return `${trimmed.slice(0, 13)}…`;
 }
 
 function pickActiveRecipe(workspace: AgentWorkspace | null): AgentRecipe | null {

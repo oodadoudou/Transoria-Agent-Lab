@@ -360,6 +360,11 @@ export interface Messages {
     draftSub: string;
     applyDraft: string;
     discardDraft: string;
+    adjustDraft: string;
+    adjustDraftTitle: string;
+    adjustDraftPlaceholder: string;
+    submitAdjustment: string;
+    cancelAdjustment: string;
     noDraft: string;
     inventoryTitle: string;
     inventorySub: string;
@@ -389,6 +394,9 @@ export interface Messages {
     thinkingTitle: string;
     thinkingLead: string;
     thinkingSteps: string[];
+    showProcessDetails: string;
+    hideProcessDetails: string;
+    processDisclosure: string;
     expandMessage: string;
     collapseMessage: string;
     activeRecipeTitle: string;

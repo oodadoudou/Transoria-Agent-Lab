@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from secrets import token_hex
@@ -261,6 +262,58 @@ def _build_handlers(
         project_store.save(final_state)
         return respond(final_state)
 
+    def revise_draft(payload: Mapping[str, object]) -> dict[str, object]:
+        draft_id = expect_string(payload, "draft_id")
+        adjustment = expect_string(payload, "adjustment").strip()
+        if not adjustment:
+            raise BridgeError.invalid_argument(
+                "adjustment must not be empty.",
+                field="adjustment",
+            )
+        if len(adjustment) > 4000:
+            raise BridgeError.invalid_argument(
+                "adjustment is too long.",
+                field="adjustment",
+                details={"max_length": 4000},
+            )
+
+        current = _load_with_reconciled_active_task(project_store, task_service)
+        conversation = _require_active(current)
+        draft = conversation.pending_draft
+        if draft is None or draft.id != draft_id or draft.status != "pending":
+            raise BridgeError.not_found(
+                f"pending draft {draft_id!r} does not exist.",
+                details={"draft_id": draft_id},
+        )
+
+        visible_request = f"调整草案：{adjustment}"
+        conversation = conversation.append_message(
+            AgentMessage.create("user", visible_request)
+        )
+        state_with_user = current.with_active(conversation)
+
+        reply, revised_draft = _generate_reply(
+            state_with_user,
+            user_message=_draft_revision_prompt(adjustment, draft),
+            profile_store=profile_store,
+            cache_root=cache_root,
+            settings_store=settings_store,
+            task_service=task_service,
+            llm_client_factory=llm_client_factory,
+        )
+        conversation = _require_active(state_with_user).append_message(
+            AgentMessage.create("assistant", reply)
+        )
+        if revised_draft is not None:
+            conversation = conversation.archive_pending(
+                "discarded",
+                payload=_sanitize_draft_payload(draft),
+            )
+            conversation = conversation.with_pending_draft(revised_draft)
+        final_state = state_with_user.with_active(conversation)
+        project_store.save(final_state)
+        return respond(final_state)
+
     def create_conversation(payload: Mapping[str, object]) -> dict[str, object]:
         raw_title = payload.get("title")
         title = raw_title.strip() if isinstance(raw_title, str) else ""
@@ -447,6 +500,7 @@ def _build_handlers(
         "agent.send_message": send_message,
         "agent.apply_draft": apply_draft,
         "agent.discard_draft": discard_draft,
+        "agent.revise_draft": revise_draft,
         "agent.create_conversation": create_conversation,
         "agent.switch_conversation": switch_conversation,
         "agent.rename_conversation": rename_conversation,
@@ -536,6 +590,28 @@ def _generate_reply(
             profile_store=profile_store,
         )
     return reply, draft
+
+
+def _draft_revision_prompt(adjustment: str, draft: AgentActionDraft) -> str:
+    sanitized = {
+        "kind": draft.kind,
+        "title": draft.title,
+        "summary": draft.summary,
+        "payload": _sanitize_draft_payload(draft),
+    }
+    return "\n\n".join(
+        (
+            "The user clicked Adjust on the current pending draft.",
+            "Revise that draft according to the adjustment below.",
+            "Do not apply, save, or execute anything. Return compact JSON with one revised draft, or draft null if the adjustment is ambiguous.",
+            "Keep the same action kind unless the user explicitly asks for a different action.",
+            "If the draft involves masked secrets, do not invent or echo secret values.",
+            "User adjustment:",
+            adjustment,
+            "Current pending draft:",
+            json.dumps(sanitized, ensure_ascii=False, indent=2),
+        )
+    )
 
 
 def _apply_workspace_patch(

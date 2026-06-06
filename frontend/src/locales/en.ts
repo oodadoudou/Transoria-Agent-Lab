@@ -614,8 +614,14 @@ export const en: Messages = {
     draftTitle: "Pending draft",
     draftSub:
       "No configuration is written and no task is started until you confirm.",
-    applyDraft: "Confirm",
+    applyDraft: "Apply",
     discardDraft: "Discard",
+    adjustDraft: "Adjust",
+    adjustDraftTitle: "Adjust draft",
+    adjustDraftPlaceholder:
+      "Describe what to change, e.g. rename the prompt to…",
+    submitAdjustment: "Regenerate draft",
+    cancelAdjustment: "Cancel",
     noDraft: "No pending draft.",
     inventoryTitle: "Available models",
     inventorySub:
@@ -642,7 +648,7 @@ export const en: Messages = {
     conversationsSub:
       "Each conversation keeps its own messages and drafts; config and memory are shared across the workspace.",
     collapseHistory: "Collapse",
-    expandHistory: "History",
+    expandHistory: "Expand",
     newConversation: "New conversation",
     untitledConversation: "Untitled conversation",
     renameConversation: "Rename",
@@ -650,6 +656,10 @@ export const en: Messages = {
     thinkingTitle: "Agent is working",
     thinkingLead: "The model is thinking and preparing a response.",
     thinkingSteps: ["Reading context", "Checking current config", "Preparing a reply or draft"],
+    showProcessDetails: "Show process",
+    hideProcessDetails: "Hide process",
+    processDisclosure:
+      "This shows visible agent processing status, not hidden model reasoning.",
     expandMessage: "Show more",
     collapseMessage: "Show less",
     activeRecipeTitle: "Active recipe",
