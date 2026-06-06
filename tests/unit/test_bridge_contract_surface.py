@@ -36,6 +36,12 @@ EXPECTED_METHODS: tuple[str, ...] = (
     "app.get_metadata",
     # agent lab
     "agent.read_workspace",
+    "agent.list_model_profiles",
+    "agent.list_prompt_presets",
+    "agent.list_recipes",
+    "agent.get_active_task",
+    "agent.list_recent_task_summaries",
+    "agent.get_artifact_availability",
     "agent.update_workspace",
     "agent.send_message",
     "agent.apply_draft",
@@ -229,7 +235,8 @@ def test_backend_registers_full_contract(router):
     # 11 removed before 1.1.0 release (file organizer pulled from scope).
     # 6 added 2026-06-06 (agent conversation list + direct memory management).
     # 4 added 2026-06-06 (agent recipe create/update/delete/apply).
-    assert len(actual) == 143
+    # 6 added 2026-06-06 (agent read-only status/config query surface).
+    assert len(actual) == 149
 # Test 2 — frontend bridge wraps every backend method
 
 
@@ -265,6 +272,15 @@ def test_frontend_client_wraps_every_backend_method():
 MIN_PAYLOADS: dict[str, dict[str, object]] = {
     "app.get_metadata": {},
     "agent.read_workspace": {},
+    "agent.list_model_profiles": {},
+    "agent.list_prompt_presets": {},
+    "agent.list_recipes": {},
+    "agent.get_active_task": {},
+    "agent.list_recent_task_summaries": {},
+    "agent.get_artifact_availability": {
+        "kind": "translation",
+        "task_id": "missing",
+    },
     "agent.update_workspace": {"patch": {}},
     "agent.send_message": {"message": "hello"},
     "agent.apply_draft": {"draft_id": "missing"},

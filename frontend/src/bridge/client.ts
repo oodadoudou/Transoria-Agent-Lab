@@ -2,7 +2,15 @@ import { getTransport } from "./transport";
 import { nativeDialogs } from "./native";
 import type {
   AllSettings,
+  AgentActiveTaskResponse,
+  AgentArtifactAvailability,
+  AgentInventory,
+  AgentInventoryProfile,
+  AgentInventoryPrompt,
   AgentRecipeInput,
+  AgentRecipeListResponse,
+  AgentTaskKind,
+  AgentTaskSummary,
   AgentWorkspace,
   AgentWorkspaceResponse,
   AppMetadata,
@@ -261,6 +269,40 @@ export const promptsBridge = {
 export const agentBridge = {
   readWorkspace(): Promise<AgentWorkspaceResponse> {
     return call("agent.read_workspace");
+  },
+  listModelProfiles(): Promise<{ profiles: AgentInventoryProfile[] }> {
+    return call("agent.list_model_profiles");
+  },
+  listPromptPresets(
+    kind?: PromptKind,
+  ): Promise<
+    | { prompts: AgentInventory["prompts"] }
+    | { kind: PromptKind; presets: AgentInventoryPrompt[] }
+  > {
+    return call("agent.list_prompt_presets", kind ? { kind } : {});
+  },
+  listRecipes(): Promise<AgentRecipeListResponse> {
+    return call("agent.list_recipes");
+  },
+  getActiveTask(): Promise<AgentActiveTaskResponse> {
+    return call("agent.get_active_task");
+  },
+  listRecentTaskSummaries(
+    opts: { kind?: AgentTaskKind; limit?: number } = {},
+  ): Promise<
+    | { kind: AgentTaskKind; tasks: AgentTaskSummary[] }
+    | { tasks_by_kind: Record<AgentTaskKind, AgentTaskSummary[]> }
+  > {
+    return call("agent.list_recent_task_summaries", opts);
+  },
+  getArtifactAvailability(
+    kind: AgentTaskKind,
+    taskId: string,
+  ): Promise<AgentArtifactAvailability> {
+    return call("agent.get_artifact_availability", {
+      kind,
+      task_id: taskId,
+    });
   },
   updateWorkspace(
     patch: Partial<

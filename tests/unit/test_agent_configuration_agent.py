@@ -97,6 +97,7 @@ def test_parse_valid_draft() -> None:
 def test_system_prompt_documents_phase_b3_configuration_rules() -> None:
     assert "ask a concise follow-up question" in AGENT_SYSTEM_PROMPT
     assert "Do not silently invent" in AGENT_SYSTEM_PROMPT
+    assert "Read-only status questions do not need drafts" in AGENT_SYSTEM_PROMPT
     assert "create_model_profile" in AGENT_SYSTEM_PROMPT
     assert "update_model_profile" in AGENT_SYSTEM_PROMPT
     assert "weak model" in AGENT_SYSTEM_PROMPT

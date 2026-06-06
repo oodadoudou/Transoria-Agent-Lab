@@ -162,6 +162,37 @@ export interface AgentInventory {
   prompts: Record<PromptKind, AgentInventoryPrompt[]>;
 }
 
+export interface AgentTaskSummary {
+  id: string;
+  kind: AgentTaskKind;
+  status: TaskStatus;
+  created_at: string;
+  updated_at: string;
+  artifact_available: boolean;
+  artifact_keys: string[];
+}
+
+export interface AgentActiveTaskResponse {
+  active_task: AgentActiveTask | null;
+  task: TaskHeader | null;
+}
+
+export interface AgentRecipeListResponse {
+  recipes: AgentRecipe[];
+  active_recipe_id: string | null;
+}
+
+export interface AgentArtifactAvailability {
+  kind: AgentTaskKind;
+  task_id: string;
+  available: boolean;
+  artifact_keys: string[];
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
 export interface AgentWorkspaceResponse {
   workspace: AgentWorkspace;
   inventory: AgentInventory;

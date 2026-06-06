@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from transoria.agent.configuration_agent import AGENT_SYSTEM_PROMPT
+from transoria.agent.project_store import AgentProjectStore
+from transoria.agent.schemas import AgentActiveTask
 from transoria.bridge import BridgeError, build_default_router
 from transoria.bridge.handlers.settings import default_store
 from transoria.bridge.task_service import TaskService
@@ -19,6 +21,7 @@ from transoria.prompts import (
     DEFAULT_TRANSLATION_PRESET_ID,
 )
 from transoria.runtime.task_record import TaskRecord
+from transoria.runtime.cache import TaskCache
 
 
 class RaisingAgentClient:
@@ -79,6 +82,24 @@ def _seed_weak_profile(cache_root: Path) -> ModelConfig:
     )
 
 
+def _write_task(
+    cache_root: Path,
+    *,
+    task_id: str,
+    kind: TaskKind,
+    status: TaskStatus,
+) -> None:
+    TaskCache(root=cache_root / "tasks").save_task(
+        TaskRecord(
+            id=task_id,
+            kind=kind,
+            status=status,
+            created_at="2026-01-01T00:00:00.000+00:00",
+            updated_at="2026-01-01T00:00:01.000+00:00",
+        )
+    )
+
+
 def test_read_workspace_returns_default_history_and_inventory(tmp_path: Path) -> None:
     _seed_profile(tmp_path)
     router = build_default_router(cache_root=tmp_path)
@@ -97,6 +118,101 @@ def test_read_workspace_returns_default_history_and_inventory(tmp_path: Path) ->
     assert profile["rpm_limit"] == 120
     assert profile["tpm_limit"] == 60000
     assert profile["retry_attempts"] == 4
+
+
+def test_agent_read_only_queries_do_not_mutate_workspace(tmp_path: Path) -> None:
+    _seed_profile(tmp_path)
+    router = build_default_router(cache_root=tmp_path)
+    router.call(
+        "agent.create_recipe",
+        {
+            "name": "Baseline",
+            "stage_model_ids": {"translation": "profile-workflow"},
+            "stage_prompt_ids": {"translation": DEFAULT_TRANSLATION_PRESET_ID},
+        },
+    )
+    before = router.call("agent.read_workspace", {})["workspace"]
+
+    profiles = router.call("agent.list_model_profiles", {})
+    prompts = router.call("agent.list_prompt_presets", {"kind": "translation"})
+    recipes = router.call("agent.list_recipes", {})
+    active = router.call("agent.get_active_task", {})
+    recent = router.call("agent.list_recent_task_summaries", {"limit": 2})
+
+    assert profiles["profiles"][0]["id"] == "profile-workflow"  # type: ignore[index]
+    assert prompts["kind"] == "translation"
+    assert recipes["recipes"][0]["name"] == "Baseline"  # type: ignore[index]
+    assert active == {"active_task": None, "task": None}
+    assert recent["tasks_by_kind"]["translation"] == []  # type: ignore[index]
+    assert router.call("agent.read_workspace", {})["workspace"] == before
+
+
+def test_agent_recent_task_summaries_include_artifact_availability(
+    tmp_path: Path,
+) -> None:
+    _write_task(
+        tmp_path,
+        task_id="translation-done",
+        kind=TaskKind.TRANSLATION,
+        status=TaskStatus.COMPLETED,
+    )
+    result_path = tmp_path / "tasks" / "translation-done" / "result.json"
+    result_path.write_text(
+        json.dumps({"output_files": ["book.txt"], "statistics": {}}),
+        encoding="utf-8",
+    )
+    router = build_default_router(cache_root=tmp_path)
+
+    response = router.call(
+        "agent.list_recent_task_summaries",
+        {"kind": "translation", "limit": 1},
+    )
+
+    [task] = response["tasks"]  # type: ignore[index]
+    assert task["id"] == "translation-done"
+    assert task["artifact_available"] is True
+    assert task["artifact_keys"] == ["output_files", "statistics"]
+
+
+def test_agent_artifact_availability_returns_false_for_missing_task(
+    tmp_path: Path,
+) -> None:
+    router = build_default_router(cache_root=tmp_path)
+
+    response = router.call(
+        "agent.get_artifact_availability",
+        {"kind": "translation", "task_id": "translation-missing"},
+    )
+
+    assert response["available"] is False
+    assert response["error"]["code"] == "bridge.not_found"  # type: ignore[index]
+
+
+def test_agent_get_active_task_reconciles_terminal_cache_record(
+    tmp_path: Path,
+) -> None:
+    _write_task(
+        tmp_path,
+        task_id="translation-done",
+        kind=TaskKind.TRANSLATION,
+        status=TaskStatus.COMPLETED,
+    )
+    store = AgentProjectStore.from_cache_root(tmp_path)
+    state = store.load().with_active_task(
+        AgentActiveTask.create(
+            task_id="translation-done",
+            kind="translation",
+            conversation_id=store.load().active_conversation_id or "",
+            started_at="2026-01-01T00:00:00.000+00:00",
+        )
+    )
+    store.save(state)
+    router = build_default_router(cache_root=tmp_path)
+
+    response = router.call("agent.get_active_task", {})
+
+    assert response == {"active_task": None, "task": None}
+    assert router.call("agent.read_workspace", {})["workspace"]["active_task"] is None
 
 
 def test_chat_without_workflow_model_is_saved_without_llm_call(tmp_path: Path) -> None:

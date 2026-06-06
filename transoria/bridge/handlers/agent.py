@@ -34,7 +34,7 @@ from transoria.bridge.errors import BridgeError
 from transoria.bridge.handlers._utils import expect_string
 from transoria.bridge.router import BridgeRouter
 from transoria.bridge.task_service import TaskService
-from transoria.domain import TaskStatus
+from transoria.domain import TaskKind, TaskStatus
 from transoria.llm.client import ChatRequest, LlmClient, LlmRequestError
 from transoria.llm.config import ModelConfig, ProviderFormat, ThinkingLevel
 from transoria.model_profiles import ModelProfileStore
@@ -56,6 +56,11 @@ _MAX_CONTEXT_MESSAGES = 20
 _MAX_RECIPE_NAME_LENGTH = 120
 _MAX_RECIPE_DESCRIPTION_LENGTH = 400
 _MAX_RECIPES = 50
+_AGENT_TASK_KINDS: tuple[str, ...] = (
+    "translation",
+    "glossary",
+    "glossary_review",
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,73 @@ def _build_handlers(
 
     def read_workspace(_payload: Mapping[str, object]) -> dict[str, object]:
         return respond(_load_with_reconciled_active_task(project_store, task_service))
+
+    def list_model_profiles(_payload: Mapping[str, object]) -> dict[str, object]:
+        return {"profiles": _inventory(profile_store, cache_root)["profiles"]}
+
+    def list_prompt_presets(payload: Mapping[str, object]) -> dict[str, object]:
+        prompts = _inventory(profile_store, cache_root)["prompts"]
+        kind = _optional_agent_string(payload, "kind")
+        if kind is None:
+            return {"prompts": prompts}
+        if kind not in {prompt_kind.value for prompt_kind in PromptKind}:
+            raise BridgeError.invalid_argument(
+                f"unsupported prompt kind: {kind!r}",
+                field="kind",
+            )
+        return {"kind": kind, "presets": prompts[kind]}  # type: ignore[index]
+
+    def list_recipes(_payload: Mapping[str, object]) -> dict[str, object]:
+        state = _load_with_reconciled_active_task(project_store, task_service)
+        return {
+            "recipes": [recipe.to_dict() for recipe in state.recipes],
+            "active_recipe_id": _active_recipe_id(state),
+        }
+
+    def get_active_task(_payload: Mapping[str, object]) -> dict[str, object]:
+        state = _load_with_reconciled_active_task(project_store, task_service)
+        active = state.active_task
+        if active is None:
+            return {"active_task": None, "task": None}
+        return {
+            "active_task": active.to_dict(),
+            "task": _task_header_or_none(task_service, active.kind, active.task_id),
+        }
+
+    def list_recent_task_summaries(payload: Mapping[str, object]) -> dict[str, object]:
+        kind = _optional_agent_string(payload, "kind")
+        limit = _optional_agent_limit(payload, default=5)
+        if kind is not None:
+            _validate_agent_task_kind(kind)
+            return {
+                "kind": kind,
+                "tasks": _recent_task_summaries(
+                    task_service,
+                    kind=kind,
+                    limit=limit,
+                ),
+            }
+        return {
+            "tasks_by_kind": {
+                task_kind: _recent_task_summaries(
+                    task_service,
+                    kind=task_kind,
+                    limit=limit,
+                )
+                for task_kind in _AGENT_TASK_KINDS
+            }
+        }
+
+    def get_artifact_availability(payload: Mapping[str, object]) -> dict[str, object]:
+        kind = expect_string(payload, "kind").strip()
+        _validate_agent_task_kind(kind)
+        task_id = expect_string(payload, "task_id").strip()
+        if not task_id:
+            raise BridgeError.invalid_argument(
+                "task_id must not be empty.",
+                field="task_id",
+            )
+        return _artifact_availability(task_service, kind=kind, task_id=task_id)
 
     def update_workspace(payload: Mapping[str, object]) -> dict[str, object]:
         patch = payload.get("patch")
@@ -358,6 +430,12 @@ def _build_handlers(
 
     return {
         "agent.read_workspace": read_workspace,
+        "agent.list_model_profiles": list_model_profiles,
+        "agent.list_prompt_presets": list_prompt_presets,
+        "agent.list_recipes": list_recipes,
+        "agent.get_active_task": get_active_task,
+        "agent.list_recent_task_summaries": list_recent_task_summaries,
+        "agent.get_artifact_availability": get_artifact_availability,
         "agent.update_workspace": update_workspace,
         "agent.send_message": send_message,
         "agent.apply_draft": apply_draft,
@@ -409,6 +487,7 @@ def _generate_reply(
         current_state=_llm_context(
             state,
             settings_store=settings_store,
+            task_service=task_service,
         ),
     )
     request = ChatRequest(
@@ -1871,10 +1950,155 @@ def _conversation_summary(conversation: AgentConversation) -> dict[str, object]:
     }
 
 
+def _active_recipe_id(state: AgentWorkspaceState) -> str | None:
+    for recipe in state.recipes:
+        if (
+            dict(recipe.stage_model_ids) == dict(state.stage_model_ids)
+            and dict(recipe.stage_prompt_ids) == dict(state.stage_prompt_ids)
+        ):
+            return recipe.id
+    return None
+
+
+def _optional_agent_string(
+    payload: Mapping[str, object],
+    key: str,
+) -> str | None:
+    raw = payload.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise BridgeError.invalid_argument(
+            f"{key} must be a string.",
+            field=key,
+        )
+    value = raw.strip()
+    return value or None
+
+
+def _optional_agent_limit(
+    payload: Mapping[str, object],
+    *,
+    default: int,
+) -> int:
+    raw = payload.get("limit")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise BridgeError.invalid_argument(
+            "limit must be an integer.",
+            field="limit",
+        ) from exc
+    if value < 0:
+        raise BridgeError.invalid_argument(
+            "limit must be >= 0.",
+            field="limit",
+        )
+    return value
+
+
+def _validate_agent_task_kind(kind: str) -> None:
+    if kind not in _AGENT_TASK_KINDS:
+        raise BridgeError.invalid_argument(
+            f"unsupported agent task kind: {kind!r}",
+            field="kind",
+        )
+
+
+def _task_header_or_none(
+    task_service: TaskService,
+    kind: str,
+    task_id: str,
+) -> dict[str, object] | None:
+    try:
+        record = task_service.cache.load_record(task_id)
+    except (TaskNotFoundError, ValueError, OSError):
+        return None
+    try:
+        expected = TaskKind(kind)
+    except ValueError:
+        return None
+    if record.kind is not expected:
+        return None
+    return {
+        "id": record.id,
+        "kind": record.kind.value,
+        "status": record.status.value,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
+
+
+def _recent_task_summaries(
+    task_service: TaskService,
+    *,
+    kind: str,
+    limit: int,
+) -> list[dict[str, object]]:
+    listing = task_service.list_recent_tasks(kind=kind, limit=limit)
+    tasks = listing.get("tasks")
+    if not isinstance(tasks, list):
+        return []
+    summaries: list[dict[str, object]] = []
+    for item in tasks:
+        if not isinstance(item, Mapping):
+            continue
+        task_id = str(item.get("id", "")).strip()
+        if not task_id:
+            continue
+        availability = _artifact_availability(
+            task_service,
+            kind=kind,
+            task_id=task_id,
+        )
+        summaries.append(
+            {
+                "id": task_id,
+                "kind": str(item.get("kind") or kind),
+                "status": str(item.get("status") or ""),
+                "created_at": str(item.get("created_at") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+                "artifact_available": bool(availability["available"]),
+                "artifact_keys": list(availability["artifact_keys"]),
+            }
+        )
+    return summaries
+
+
+def _artifact_availability(
+    task_service: TaskService,
+    *,
+    kind: str,
+    task_id: str,
+) -> dict[str, object]:
+    try:
+        payload = task_service.read_artifacts(kind=kind, task_id=task_id)
+    except BridgeError as exc:
+        return {
+            "kind": kind,
+            "task_id": task_id,
+            "available": False,
+            "artifact_keys": [],
+            "error": {
+                "code": exc.code,
+                "message": str(exc),
+            },
+        }
+    return {
+        "kind": kind,
+        "task_id": task_id,
+        "available": True,
+        "artifact_keys": sorted(str(key) for key in payload.keys()),
+    }
+
+
 def _llm_context(
     state: AgentWorkspaceState,
     *,
     settings_store: SettingsStore,
+    task_service: TaskService,
 ) -> dict[str, object]:
     active = state.active()
     recent = active.messages[-_MAX_CONTEXT_MESSAGES:] if active else ()
@@ -1884,10 +2108,24 @@ def _llm_context(
         "stage_prompt_ids": dict(state.stage_prompt_ids),
         "active_task": state.active_task.to_dict() if state.active_task else None,
         "start_task_completeness": all_start_draft_completeness(state),
+        "recent_task_summaries": {
+            task_kind: _recent_task_summaries(
+                task_service,
+                kind=task_kind,
+                limit=3,
+            )
+            for task_kind in _AGENT_TASK_KINDS
+        },
         "settings_defaults": _settings_defaults(settings_store),
         "memories": list(state.memories),
         "recipes": [
-            {"id": recipe.id, "name": recipe.name, "description": recipe.description}
+            {
+                "id": recipe.id,
+                "name": recipe.name,
+                "description": recipe.description,
+                "stage_model_ids": dict(recipe.stage_model_ids),
+                "stage_prompt_ids": dict(recipe.stage_prompt_ids),
+            }
             for recipe in state.recipes
         ],
         "recent_messages": [
