@@ -61,6 +61,8 @@ class ChatRequest:
     history: tuple[ChatMessage, ...] = field(default_factory=tuple)
     temperature: float | None = None
     stream: bool = False
+    json_response_schema: Mapping[str, object] | None = None
+    json_response_schema_name: str = "response"
     # Optional task-scoped key pool. When provided, the client picks
     # keys via round-robin from the pool instead of iterating
     # ``model.api_keys`` in order. Persistent auth failures evict
@@ -347,6 +349,15 @@ class LlmClient:
             payload["frequency_penalty"] = request.model.frequency_penalty
         if request.stream:
             payload["stream"] = True
+        if request.json_response_schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": request.json_response_schema_name,
+                    "schema": dict(request.json_response_schema),
+                    "strict": True,
+                },
+            }
         thinking = _thinking_payload(request.model.thinking_level)
         if thinking is not None:
             payload["thinking"] = thinking
@@ -438,6 +449,9 @@ class LlmClient:
             generation_config["thinkingConfig"] = {
                 "thinkingBudget": request.model.effective_thinking_budget()
             }
+        if request.json_response_schema is not None:
+            generation_config["responseMimeType"] = "application/json"
+            generation_config["responseSchema"] = dict(request.json_response_schema)
         if generation_config:
             payload["generationConfig"] = generation_config
 

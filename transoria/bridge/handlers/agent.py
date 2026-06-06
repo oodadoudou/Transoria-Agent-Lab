@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from secrets import token_hex
 from typing import Callable, Mapping
 
 from transoria.agent.configuration_agent import (
+    AGENT_REPAIR_SYSTEM_PROMPT,
+    AGENT_RESPONSE_JSON_SCHEMA,
     AGENT_SYSTEM_PROMPT,
+    AgentResponseParseError,
+    build_repair_prompt,
     build_user_prompt,
+    build_validation_repair_prompt,
     parse_agent_response,
 )
 from transoria.agent.completeness import (
@@ -36,7 +42,7 @@ from transoria.bridge.handlers._utils import expect_string
 from transoria.bridge.router import BridgeRouter
 from transoria.bridge.task_service import TaskService
 from transoria.domain import TaskKind, TaskStatus
-from transoria.llm.client import ChatRequest, LlmClient, LlmRequestError
+from transoria.llm.client import ChatRequest, ChatResponse, LlmClient, LlmRequestError
 from transoria.llm.config import ModelConfig, ProviderFormat, ThinkingLevel
 from transoria.model_profiles import ModelProfileStore
 from transoria.prompts import PromptKind, PromptPreset, PromptPresetStore
@@ -54,14 +60,37 @@ _PROMPT_KIND_BY_SLOT = {
 
 _PROMPT_KIND_ALIASES = {
     "translation": PromptKind.TRANSLATION,
+    "translation_prompt": PromptKind.TRANSLATION,
+    "translate_prompt": PromptKind.TRANSLATION,
     "translate": PromptKind.TRANSLATION,
+    "翻译": PromptKind.TRANSLATION,
+    "翻译prompt": PromptKind.TRANSLATION,
+    "翻译提示词": PromptKind.TRANSLATION,
+    "翻译预设": PromptKind.TRANSLATION,
     "glossary": PromptKind.GLOSSARY,
     "term_extract": PromptKind.GLOSSARY,
     "term_extraction": PromptKind.GLOSSARY,
     "glossary_extraction": PromptKind.GLOSSARY,
+    "glossary_prompt": PromptKind.GLOSSARY,
+    "term_extract_prompt": PromptKind.GLOSSARY,
+    "术语": PromptKind.GLOSSARY,
+    "术语提取": PromptKind.GLOSSARY,
+    "术语提取prompt": PromptKind.GLOSSARY,
+    "术语提取提示词": PromptKind.GLOSSARY,
+    "术语提取预设": PromptKind.GLOSSARY,
     "glossary_review": PromptKind.GLOSSARY_REVIEW,
+    "glossary_review_prompt": PromptKind.GLOSSARY_REVIEW,
     "term_review": PromptKind.GLOSSARY_REVIEW,
+    "term_review_prompt": PromptKind.GLOSSARY_REVIEW,
     "term_audit": PromptKind.GLOSSARY_REVIEW,
+    "术语审核": PromptKind.GLOSSARY_REVIEW,
+    "术语审查": PromptKind.GLOSSARY_REVIEW,
+    "术语审核prompt": PromptKind.GLOSSARY_REVIEW,
+    "术语审查prompt": PromptKind.GLOSSARY_REVIEW,
+    "术语审核提示词": PromptKind.GLOSSARY_REVIEW,
+    "术语审查提示词": PromptKind.GLOSSARY_REVIEW,
+    "术语审核预设": PromptKind.GLOSSARY_REVIEW,
+    "术语审查预设": PromptKind.GLOSSARY_REVIEW,
 }
 
 _MAX_TITLE_LENGTH = 120
@@ -69,6 +98,7 @@ _MAX_CONTEXT_MESSAGES = 20
 _MAX_RECIPE_NAME_LENGTH = 120
 _MAX_RECIPE_DESCRIPTION_LENGTH = 400
 _MAX_RECIPES = 50
+_MAX_COMPOUND_ACTIONS = 8
 _AGENT_TASK_KINDS: tuple[str, ...] = (
     "translation",
     "glossary",
@@ -554,25 +584,30 @@ def _generate_reply(
             None,
         )
     inventory = _inventory(profile_store, cache_root)
+    current_state = _llm_context(
+        state,
+        settings_store=settings_store,
+        task_service=task_service,
+    )
     prompt = build_user_prompt(
         user_message=user_message,
         inventory=inventory,
-        current_state=_llm_context(
-            state,
-            settings_store=settings_store,
-            task_service=task_service,
-        ),
+        current_state=current_state,
     )
+    model = _profile_for_workflow_chat(profile, state.workflow_thinking_level)
+    client = llm_client_factory()
     request = ChatRequest(
-        model=_profile_for_workflow_chat(profile, state.workflow_thinking_level),
+        model=model,
         system_prompt=AGENT_SYSTEM_PROMPT,
         user_prompt=prompt,
         temperature=0.2,
         stream=False,
+        json_response_schema=AGENT_RESPONSE_JSON_SCHEMA,
+        json_response_schema_name="agent_configuration_response",
         log_label="agent configuration chat",
     )
     try:
-        response = asyncio.run(llm_client_factory().chat(request))
+        response = _run_agent_chat_with_schema_fallback(client, request)
     except LlmRequestError as exc:
         return (
             f"工作模型调用失败：[{exc.code}] {exc}",
@@ -583,7 +618,12 @@ def _generate_reply(
             f"工作模型调用失败：{type(exc).__name__}: {exc}",
             None,
         )
-    reply, draft = parse_agent_response(response.content)
+    reply, draft = _parse_or_repair_agent_response(
+        client,
+        model=model,
+        user_message=user_message,
+        raw_response=response.content,
+    )
     if draft is not None:
         try:
             _validate_draft(
@@ -594,7 +634,90 @@ def _generate_reply(
                 task_service=task_service,
             )
         except BridgeError as exc:
-            return (f"{reply}\n\n（已忽略无法应用的草案：{exc}）".strip(), None)
+            repaired = _repair_invalid_agent_draft(
+                client,
+                model=model,
+                user_message=user_message,
+                reply=reply,
+                draft=draft,
+                validation_error=str(exc),
+                inventory=inventory,
+                current_state=current_state,
+            )
+            if repaired is None:
+                salvaged = _salvage_invalid_agent_draft(
+                    user_message=user_message,
+                    reply=reply,
+                    draft=draft,
+                    current_state=current_state,
+                )
+                if salvaged is not None:
+                    try:
+                        _validate_draft(
+                            salvaged,
+                            state=state,
+                            profile_store=profile_store,
+                            cache_root=cache_root,
+                            task_service=task_service,
+                        )
+                    except BridgeError:
+                        salvaged = None
+                if salvaged is not None:
+                    draft = salvaged
+                    reply = (
+                        f"{reply}\n\n我已根据你的原始请求补齐为可确认的配置草案，请检查后再应用。"
+                    )
+                    reply = _append_model_quality_warnings(
+                        reply,
+                        draft=draft,
+                        state=state,
+                        profile_store=profile_store,
+                    )
+                    return reply, draft
+                return (f"{reply}\n\n（已忽略无法应用的草案：{exc}）".strip(), None)
+            reply, draft = repaired
+            try:
+                _validate_draft(
+                    draft,
+                    state=state,
+                    profile_store=profile_store,
+                    cache_root=cache_root,
+                    task_service=task_service,
+                )
+            except BridgeError as repaired_exc:
+                salvaged = _salvage_invalid_agent_draft(
+                    user_message=user_message,
+                    reply=reply,
+                    draft=draft,
+                    current_state=current_state,
+                )
+                if salvaged is not None:
+                    try:
+                        _validate_draft(
+                            salvaged,
+                            state=state,
+                            profile_store=profile_store,
+                            cache_root=cache_root,
+                            task_service=task_service,
+                        )
+                    except BridgeError:
+                        salvaged = None
+                if salvaged is not None:
+                    draft = salvaged
+                    reply = (
+                        f"{reply}\n\n我已根据你的原始请求补齐为可确认的配置草案，请检查后再应用。"
+                    )
+                    reply = _append_model_quality_warnings(
+                        reply,
+                        draft=draft,
+                        state=state,
+                        profile_store=profile_store,
+                    )
+                    return reply, draft
+                return (
+                    f"{reply}\n\n（已忽略无法应用的草案：{repaired_exc}）".strip(),
+                    None,
+                )
         reply = _append_model_quality_warnings(
             reply,
             draft=draft,
@@ -602,6 +725,219 @@ def _generate_reply(
             profile_store=profile_store,
         )
     return reply, draft
+
+
+def _run_agent_chat_with_schema_fallback(
+    client: LlmClient,
+    request: ChatRequest,
+) -> ChatResponse:
+    try:
+        return asyncio.run(client.chat(request))
+    except LlmRequestError:
+        if request.json_response_schema is None:
+            raise
+        fallback = replace(request, json_response_schema=None)
+        return asyncio.run(client.chat(fallback))
+
+
+def _parse_or_repair_agent_response(
+    client: LlmClient,
+    *,
+    model: ModelConfig,
+    user_message: str,
+    raw_response: str,
+) -> tuple[str, AgentActionDraft | None]:
+    try:
+        return parse_agent_response(raw_response, require_json=True)
+    except AgentResponseParseError:
+        pass
+
+    repair_request = ChatRequest(
+        model=model,
+        system_prompt=AGENT_REPAIR_SYSTEM_PROMPT,
+        user_prompt=build_repair_prompt(
+            user_message=user_message,
+            raw_response=raw_response,
+        ),
+        temperature=0.0,
+        stream=False,
+        json_response_schema=AGENT_RESPONSE_JSON_SCHEMA,
+        json_response_schema_name="agent_configuration_response",
+        log_label="agent draft repair",
+    )
+    try:
+        repaired = _run_agent_chat_with_schema_fallback(client, repair_request)
+        return parse_agent_response(repaired.content, require_json=True)
+    except (AgentResponseParseError, LlmRequestError):
+        return (
+            "工作模型返回了无法转换为配置草案的内容。请重试，或把这次配置要求拆短一些。",
+            None,
+        )
+
+
+def _repair_invalid_agent_draft(
+    client: LlmClient,
+    *,
+    model: ModelConfig,
+    user_message: str,
+    reply: str,
+    draft: AgentActionDraft,
+    validation_error: str,
+    inventory: Mapping[str, object],
+    current_state: Mapping[str, object],
+) -> tuple[str, AgentActionDraft] | None:
+    repair_request = ChatRequest(
+        model=model,
+        system_prompt=AGENT_REPAIR_SYSTEM_PROMPT,
+        user_prompt=build_validation_repair_prompt(
+            user_message=user_message,
+            invalid_reply=reply,
+            invalid_draft=draft,
+            validation_error=validation_error,
+            inventory=inventory,
+            current_state=current_state,
+        ),
+        temperature=0.0,
+        stream=False,
+        json_response_schema=AGENT_RESPONSE_JSON_SCHEMA,
+        json_response_schema_name="agent_configuration_response",
+        log_label="agent draft validation repair",
+    )
+    try:
+        repaired = _run_agent_chat_with_schema_fallback(client, repair_request)
+        repaired_reply, repaired_draft = parse_agent_response(
+            repaired.content,
+            require_json=True,
+        )
+    except (AgentResponseParseError, LlmRequestError):
+        return None
+    if repaired_draft is None:
+        return None
+    return repaired_reply, repaired_draft
+
+
+def _salvage_invalid_agent_draft(
+    *,
+    user_message: str,
+    reply: str,
+    draft: AgentActionDraft,
+    current_state: Mapping[str, object],
+) -> AgentActionDraft | None:
+    text = "\n".join((user_message, reply, draft.title, draft.summary))
+    if draft.kind == "create_prompt_preset":
+        return _salvage_create_prompt_draft(draft, text=text)
+    if draft.kind == "create_recipe":
+        return _salvage_create_recipe_draft(
+            draft,
+            text=text,
+            current_state=current_state,
+        )
+    return None
+
+
+def _salvage_create_prompt_draft(
+    draft: AgentActionDraft,
+    *,
+    text: str,
+) -> AgentActionDraft | None:
+    try:
+        prompt_kind = _coerce_prompt_kind(None, fallback_text=text)
+    except BridgeError:
+        return None
+    name = _extract_quoted_name(text) or _extract_named_value(text)
+    if not name:
+        return None
+    system_prompt = _prompt_body_from_payload(draft.payload)
+    if not system_prompt:
+        system_prompt = _build_prompt_body_from_request(
+            prompt_kind=prompt_kind,
+            user_request=text,
+        )
+    payload = dict(draft.payload)
+    payload.update(
+        {
+            "kind": prompt_kind.value,
+            "name": name,
+            "description": str(payload.get("description") or draft.summary).strip(),
+            "system_prompt": system_prompt,
+            "enabled": bool(payload.get("enabled", True)),
+        }
+    )
+    return AgentActionDraft.create(
+        kind=draft.kind,
+        title=draft.title,
+        summary=draft.summary,
+        payload=payload,
+    )
+
+
+def _salvage_create_recipe_draft(
+    draft: AgentActionDraft,
+    *,
+    text: str,
+    current_state: Mapping[str, object],
+) -> AgentActionDraft | None:
+    name = _extract_quoted_name(text) or _extract_named_value(text)
+    if not name:
+        return None
+    stage_models = current_state.get("stage_model_ids")
+    stage_prompts = current_state.get("stage_prompt_ids")
+    payload = _recipe_body_from_payload(draft.payload)
+    payload.update(
+        {
+            "name": name,
+            "description": str(payload.get("description") or draft.summary).strip(),
+            "stage_model_ids": dict(stage_models)
+            if isinstance(stage_models, Mapping)
+            else {},
+            "stage_prompt_ids": dict(stage_prompts)
+            if isinstance(stage_prompts, Mapping)
+            else {},
+        }
+    )
+    return AgentActionDraft.create(
+        kind=draft.kind,
+        title=draft.title,
+        summary=draft.summary,
+        payload=payload,
+    )
+
+
+def _build_prompt_body_from_request(
+    *,
+    prompt_kind: PromptKind,
+    user_request: str,
+) -> str:
+    stage = {
+        PromptKind.TRANSLATION: "翻译",
+        PromptKind.GLOSSARY: "术语提取",
+        PromptKind.GLOSSARY_REVIEW: "术语审核",
+    }[prompt_kind]
+    return "\n".join(
+        (
+            f"你是 Transoria {stage}流程中的专业模型。",
+            "请严格遵守用户对这套 Prompt 的要求：",
+            user_request.strip(),
+            "保持输出清晰、稳定，并优先服务于小说翻译质量。",
+        )
+    )
+
+
+def _extract_quoted_name(text: str) -> str:
+    for pattern in (r"[『「“](.+?)[』」”]", r"['\"](.+?)['\"]"):
+        match = re.search(pattern, text)
+        if match:
+            value = match.group(1).strip()
+            if value:
+                return value[:_MAX_RECIPE_NAME_LENGTH]
+    return ""
+
+
+def _extract_named_value(text: str) -> str:
+    match = re.search(r"(?:名字|名称|叫|名为)\s*[:：]?\s*([^\s，。,.]+)", text)
+    if not match:
+        return ""
+    return match.group(1).strip("『』「」“”\"' ")[:_MAX_RECIPE_NAME_LENGTH]
 
 
 def _draft_revision_prompt(adjustment: str, draft: AgentActionDraft) -> str:
@@ -810,6 +1146,19 @@ def _model_quality_warnings(
                 except BridgeError:
                     preview = current
             add("updated_profile", preview)
+    elif draft.kind == "compound_config_update":
+        try:
+            inner_drafts = _coerce_compound_action_drafts(draft.payload)
+        except BridgeError:
+            return warnings
+        for inner in inner_drafts:
+            for warning in _model_quality_warnings(
+                inner,
+                state=state,
+                profile_store=profile_store,
+            ):
+                if warning not in warnings:
+                    warnings.append(warning)
 
     return warnings
 
@@ -967,6 +1316,14 @@ def _agent_action_specs() -> dict[str, _AgentActionSpec]:
             validate=_validate_update_model_profile_action,
             apply=_apply_update_model_profile_action,
         ),
+        "compound_config_update": _AgentActionSpec(
+            kind="compound_config_update",
+            mutates=True,
+            requires_confirmation=True,
+            starts_task=False,
+            validate=_validate_compound_config_action,
+            apply=_apply_compound_config_action,
+        ),
     }
     for kind in START_DRAFT_KINDS:
         specs[kind] = _AgentActionSpec(
@@ -978,6 +1335,201 @@ def _agent_action_specs() -> dict[str, _AgentActionSpec]:
             apply=_apply_start_task_action,
         )
     return specs
+
+
+def _validate_compound_config_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    settings_store: SettingsStore | None = None,
+    task_service: TaskService,
+    **_: object,
+) -> None:
+    validation_state = state
+    for inner in _coerce_compound_action_drafts(draft.payload):
+        spec = _agent_action_spec(inner.kind)
+        spec.validate(
+            inner,
+            state=validation_state,
+            profile_store=profile_store,
+            cache_root=cache_root,
+            settings_store=settings_store,
+            task_service=task_service,
+        )
+        validation_state = _preview_compound_state(
+            validation_state,
+            inner,
+            profile_store=profile_store,
+            cache_root=cache_root,
+        )
+
+
+def _apply_compound_config_action(
+    draft: AgentActionDraft,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+    settings_store: SettingsStore,
+    task_service: TaskService,
+    **_: object,
+) -> tuple[AgentWorkspaceState, dict[str, object]]:
+    _validate_compound_config_action(
+        draft,
+        state=state,
+        profile_store=profile_store,
+        cache_root=cache_root,
+        settings_store=settings_store,
+        task_service=task_service,
+    )
+    next_state = state
+    results: list[dict[str, object]] = []
+    for inner in _coerce_compound_action_drafts(draft.payload):
+        spec = _agent_action_spec(inner.kind)
+        next_state, result = spec.apply(
+            inner,
+            state=next_state,
+            profile_store=profile_store,
+            cache_root=cache_root,
+            settings_store=settings_store,
+            task_service=task_service,
+        )
+        results.append(dict(result))
+    return next_state, {"kind": draft.kind, "results": results}
+
+
+def _coerce_compound_action_drafts(
+    payload: Mapping[str, object],
+) -> list[AgentActionDraft]:
+    raw_actions = payload.get("actions")
+    if not isinstance(raw_actions, list):
+        raise BridgeError.invalid_argument(
+            "compound draft payload.actions must be a list.",
+            field="actions",
+        )
+    if not raw_actions:
+        raise BridgeError.invalid_argument(
+            "compound draft must contain at least one action.",
+            field="actions",
+        )
+    if len(raw_actions) > _MAX_COMPOUND_ACTIONS:
+        raise BridgeError.invalid_argument(
+            "compound draft contains too many actions.",
+            field="actions",
+            details={"max_count": _MAX_COMPOUND_ACTIONS},
+        )
+    drafts: list[AgentActionDraft] = []
+    for index, raw in enumerate(raw_actions):
+        if not isinstance(raw, Mapping):
+            raise BridgeError.invalid_argument(
+                "compound action must be an object.",
+                field=f"actions[{index}]",
+            )
+        kind = str(raw.get("kind") or "")
+        if kind == "compound_config_update":
+            raise BridgeError.invalid_argument(
+                "compound actions cannot be nested.",
+                field=f"actions[{index}].kind",
+            )
+        spec = _agent_action_spec(kind)
+        if spec.mutates and not spec.requires_confirmation:  # pragma: no cover
+            raise BridgeError.invalid_argument(
+                f"mutating action must require confirmation: {kind!r}",
+                field=f"actions[{index}].kind",
+            )
+        action_payload = raw.get("payload")
+        if not isinstance(action_payload, Mapping):
+            raise BridgeError.invalid_argument(
+                "compound action payload must be an object.",
+                field=f"actions[{index}].payload",
+            )
+        drafts.append(
+            AgentActionDraft.create(
+                kind=kind,
+                title=str(raw.get("title") or kind),
+                summary=str(raw.get("summary") or ""),
+                payload=dict(action_payload),
+            )
+        )
+    return drafts
+
+
+def _preview_compound_state(
+    state: AgentWorkspaceState,
+    draft: AgentActionDraft,
+    *,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+) -> AgentWorkspaceState:
+    if draft.kind == "update_workspace":
+        return _apply_workspace_patch(
+            state,
+            draft.payload,
+            profile_store=profile_store,
+            cache_root=cache_root,
+        )
+    if draft.kind == "update_memory":
+        return state.with_memories(_coerce_memories_payload(draft.payload))
+    if draft.kind == "add_memory":
+        memories = list(state.memories)
+        for memory in _coerce_memory_items_payload(draft.payload):
+            if memory not in memories:
+                memories.append(memory)
+        return state.with_memories(tuple(memories))
+    if draft.kind == "delete_memory":
+        removals = set(_coerce_memory_items_payload(draft.payload))
+        return state.with_memories(
+            tuple(item for item in state.memories if item not in removals)
+        )
+    if draft.kind == "create_recipe":
+        name, description, stage_models, stage_prompts = _coerce_recipe_payload(
+            draft.payload,
+            profile_store=profile_store,
+            cache_root=cache_root,
+        )
+        return state.add_recipe(
+            AgentRecipe.create(
+                name=name,
+                description=description,
+                stage_model_ids=stage_models,
+                stage_prompt_ids=stage_prompts,
+            )
+        )
+    if draft.kind == "update_recipe":
+        recipe_id, fields, stage_models, stage_prompts = _coerce_recipe_update_payload(
+            draft.payload,
+            profile_store=profile_store,
+            cache_root=cache_root,
+        )
+        recipe = state.get_recipe(recipe_id)
+        if recipe is None:
+            return state
+        return state.replace_recipe(
+            recipe.with_updates(
+                name=fields.get("name"),
+                description=fields.get("description"),
+                stage_model_ids=stage_models,
+                stage_prompt_ids=stage_prompts,
+            )
+        )
+    if draft.kind == "apply_recipe":
+        recipe = _require_recipe_from_payload(draft.payload, state=state)
+        return _apply_workspace_patch(
+            state,
+            {
+                "active_recipe_id": recipe.id,
+                "stage_model_ids": dict(recipe.stage_model_ids),
+                "stage_prompt_ids": dict(recipe.stage_prompt_ids),
+            },
+            profile_store=profile_store,
+            cache_root=cache_root,
+        )
+    if draft.kind == "delete_recipe":
+        recipe = _require_recipe_from_payload(draft.payload, state=state)
+        return state.remove_recipe(recipe.id)
+    return state
 
 
 def _validate_workspace_action(
@@ -1581,14 +2133,30 @@ def _resolve_prompt_for_update(
 def _coerce_prompt_preset_payload(
     payload: Mapping[str, object],
 ) -> tuple[PromptKind, str, str, str, bool]:
-    raw_kind = str(payload.get("kind") or "").strip()
-    kind = _PROMPT_KIND_ALIASES.get(raw_kind)
-    if kind is None:
-        raise BridgeError.invalid_argument(
-            "prompt kind must be translation, glossary, or glossary_review.",
-            field="kind",
-        )
-    name = str(payload.get("name") or "").strip()
+    kind = _coerce_prompt_kind(
+        _first_present(
+            payload,
+            (
+                "kind",
+                "type",
+                "prompt_kind",
+                "promptKind",
+                "stage",
+                "category",
+                "类型",
+                "类别",
+                "用途",
+            ),
+        ),
+        fallback_text=" ".join(
+            str(payload.get(key) or "")
+            for key in ("name", "description", "system_prompt", "prompt", "content")
+        ),
+    )
+    name = str(
+        _first_present(payload, ("name", "display_name", "displayName", "名称", "名字"))
+        or ""
+    ).strip()
     system_prompt = _prompt_body_from_payload(payload)
     if not name:
         raise BridgeError.invalid_argument("name is required.", field="name")
@@ -1604,6 +2172,69 @@ def _coerce_prompt_preset_payload(
         system_prompt,
         bool(payload.get("enabled", True)),
     )
+
+
+def _coerce_prompt_kind(value: object, *, fallback_text: str = "") -> PromptKind:
+    raw_kind = str(value or "").strip()
+    normalized = (
+        (raw_kind or fallback_text).lower()
+        .replace(" ", "")
+        .replace("-", "_")
+        .replace("·", "")
+        .replace("：", "")
+        .replace(":", "")
+    )
+    kind = _PROMPT_KIND_ALIASES.get(raw_kind) or _PROMPT_KIND_ALIASES.get(normalized)
+    if kind is not None:
+        return kind
+    if any(marker in normalized for marker in ("review", "audit", "审核", "审查")):
+        return PromptKind.GLOSSARY_REVIEW
+    if any(marker in normalized for marker in ("translation", "translate", "翻译")):
+        return PromptKind.TRANSLATION
+    if any(marker in normalized for marker in ("glossary", "term", "术语")):
+        return PromptKind.GLOSSARY
+    raise BridgeError.invalid_argument(
+        "prompt kind must be translation, glossary, or glossary_review.",
+        field="kind",
+    )
+
+
+def _recipe_body_from_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    raw_recipe = _first_present(
+        payload,
+        ("recipe", "recipe_config", "recipeConfig", "config", "preset", "预设", "配方"),
+    )
+    body = dict(raw_recipe) if isinstance(raw_recipe, Mapping) else dict(payload)
+    if "name" not in body:
+        for key in (
+            "recipe_name",
+            "recipeName",
+            "preset_name",
+            "presetName",
+            "config_name",
+            "configName",
+            "configuration_name",
+            "configurationName",
+            "display_name",
+            "displayName",
+            "title",
+            "名称",
+            "名字",
+            "配方名称",
+            "预设名称",
+        ):
+            value = body.get(key)
+            if isinstance(value, str) and value.strip():
+                body["name"] = value
+                break
+    return body
+
+
+def _first_present(payload: Mapping[str, object], keys: tuple[str, ...]) -> object | None:
+    for key in keys:
+        if key in payload:
+            return payload[key]
+    return None
 
 
 def _prompt_body_from_payload(payload: Mapping[str, object]) -> str:
@@ -1625,15 +2256,16 @@ def _coerce_recipe_update_payload(
     dict[str, str | None] | None,
     dict[str, str | None] | None,
 ]:
-    recipe_id = str(payload.get("recipe_id") or payload.get("id") or "").strip()
+    body = _recipe_body_from_payload(payload)
+    recipe_id = str(body.get("recipe_id") or body.get("id") or "").strip()
     if not recipe_id:
         raise BridgeError.invalid_argument(
             "recipe_id is required.",
             field="recipe_id",
         )
     fields: dict[str, str] = {}
-    if "name" in payload:
-        name = str(payload.get("name") or "").strip()
+    if "name" in body:
+        name = str(body.get("name") or "").strip()
         if not name:
             raise BridgeError.invalid_argument("name is required.", field="name")
         if len(name) > _MAX_RECIPE_NAME_LENGTH:
@@ -1643,8 +2275,8 @@ def _coerce_recipe_update_payload(
                 details={"max_length": _MAX_RECIPE_NAME_LENGTH},
             )
         fields["name"] = name
-    if "description" in payload:
-        description = str(payload.get("description") or "").strip()
+    if "description" in body:
+        description = str(body.get("description") or "").strip()
         if len(description) > _MAX_RECIPE_DESCRIPTION_LENGTH:
             raise BridgeError.invalid_argument(
                 "description is too long.",
@@ -1653,13 +2285,13 @@ def _coerce_recipe_update_payload(
             )
         fields["description"] = description
     stage_models = (
-        _coerce_model_slots(payload.get("stage_model_ids"), profile_store=profile_store)
-        if "stage_model_ids" in payload
+        _coerce_model_slots(body.get("stage_model_ids"), profile_store=profile_store)
+        if "stage_model_ids" in body
         else None
     )
     stage_prompts = (
-        _coerce_prompt_slots(payload.get("stage_prompt_ids"), cache_root=cache_root)
-        if "stage_prompt_ids" in payload
+        _coerce_prompt_slots(body.get("stage_prompt_ids"), cache_root=cache_root)
+        if "stage_prompt_ids" in body
         else None
     )
     if not fields and stage_models is None and stage_prompts is None:
@@ -1696,7 +2328,8 @@ def _coerce_recipe_payload(
     profile_store: ModelProfileStore,
     cache_root: Path,
 ) -> tuple[str, str, dict[str, str | None], dict[str, str | None]]:
-    name = str(payload.get("name") or "").strip()
+    body = _recipe_body_from_payload(payload)
+    name = str(body.get("name") or "").strip()
     if not name:
         raise BridgeError.invalid_argument("name is required.", field="name")
     if len(name) > _MAX_RECIPE_NAME_LENGTH:
@@ -1705,7 +2338,7 @@ def _coerce_recipe_payload(
             field="name",
             details={"max_length": _MAX_RECIPE_NAME_LENGTH},
         )
-    description = str(payload.get("description") or "").strip()
+    description = str(body.get("description") or "").strip()
     if len(description) > _MAX_RECIPE_DESCRIPTION_LENGTH:
         raise BridgeError.invalid_argument(
             "description is too long.",
@@ -1713,13 +2346,13 @@ def _coerce_recipe_payload(
             details={"max_length": _MAX_RECIPE_DESCRIPTION_LENGTH},
         )
     stage_models = (
-        _coerce_model_slots(payload.get("stage_model_ids"), profile_store=profile_store)
-        if "stage_model_ids" in payload
+        _coerce_model_slots(body.get("stage_model_ids"), profile_store=profile_store)
+        if "stage_model_ids" in body
         else {}
     )
     stage_prompts = (
-        _coerce_prompt_slots(payload.get("stage_prompt_ids"), cache_root=cache_root)
-        if "stage_prompt_ids" in payload
+        _coerce_prompt_slots(body.get("stage_prompt_ids"), cache_root=cache_root)
+        if "stage_prompt_ids" in body
         else {}
     )
     return name, description, stage_models, stage_prompts

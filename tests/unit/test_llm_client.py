@@ -119,6 +119,38 @@ def test_chat_uses_chat_completions_endpoint_with_messages_and_auth_header() -> 
     assert payload["thinking"] == {"type": "disabled"}
 
 
+def test_chat_openai_payload_includes_json_schema_response_format() -> None:
+    transport = FakeTransport(responses=[TransportResult(200, _ok_body("{}"))])
+    client = LlmClient(transport=transport)
+    schema = {
+        "type": "object",
+        "properties": {"reply": {"type": "string"}},
+        "required": ["reply"],
+    }
+
+    asyncio.run(
+        client.chat(
+            ChatRequest(
+                model=_model(),
+                system_prompt="sys",
+                user_prompt="user",
+                json_response_schema=schema,
+                json_response_schema_name="agent_configuration_response",
+            )
+        )
+    )
+
+    response_format = transport.calls[0]["payload"]["response_format"]
+    assert response_format == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "agent_configuration_response",
+            "schema": schema,
+            "strict": True,
+        },
+    }
+
+
 def test_chat_includes_thinking_payload_when_thinking_enabled() -> None:
     transport = FakeTransport(responses=[TransportResult(200, _ok_body())])
     client = LlmClient(transport=transport)

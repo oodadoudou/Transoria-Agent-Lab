@@ -65,6 +65,22 @@ class SequenceAgentClient:
         )
 
 
+class FallbackAgentClient:
+    def __init__(self, error: Exception, content: str) -> None:
+        self.error = error
+        self.content = content
+        self.requests: list[ChatRequest] = []
+
+    async def chat(self, request: ChatRequest) -> ChatResponse:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            raise self.error
+        return ChatResponse(
+            content=self.content,
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
+
 def _seed_profile(cache_root: Path) -> ModelConfig:
     store = ModelProfileStore.from_cache_root(cache_root)
     return store.create(
@@ -431,6 +447,203 @@ def test_malformed_model_json_keeps_chat_recoverable(tmp_path: Path) -> None:
     assert workspace["pending_draft"] is None
     assert workspace["messages"][-1]["role"] == "assistant"
     assert workspace["messages"][-1]["content"]
+    assert "this is not json" not in workspace["messages"][-1]["content"]
+
+
+def test_malformed_model_json_can_be_repaired_into_pending_draft(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = SequenceAgentClient(
+        [
+            '我准备了草案：{"reply": "broken", "draft": ',
+            """
+            {
+              "reply": "我已把模型输出整理成可确认的草案。",
+              "draft": {
+                "kind": "create_prompt_preset",
+                "title": "创建文学翻译 Prompt",
+                "summary": "创建一个翻译提示词预设。",
+                "payload": {
+                  "kind": "translation",
+                  "name": "文学翻译",
+                  "description": "文学翻译提示词",
+                  "system_prompt": "请忠实翻译。",
+                  "enabled": true
+                }
+              }
+            }
+            """,
+        ]
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call("agent.send_message", {"message": "创建一个翻译 prompt"})
+    workspace = response["workspace"]
+
+    assert workspace["messages"][-1]["content"] == "我已把模型输出整理成可确认的草案。"
+    assert workspace["pending_draft"]["kind"] == "create_prompt_preset"  # type: ignore[index]
+    assert len(fake.requests) == 2
+    assert fake.requests[0].log_label == "agent configuration chat"
+    assert fake.requests[1].log_label == "agent draft repair"
+
+
+def test_invalid_draft_payload_can_be_repaired_into_pending_draft(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = SequenceAgentClient(
+        [
+            """
+            {
+              "reply": "我已起草。",
+              "draft": {
+                "kind": "create_prompt_preset",
+                "title": "创建现代中文叙事",
+                "summary": "创建翻译提示词预设。",
+                "payload": {}
+              }
+            }
+            """,
+            """
+            {
+              "reply": "我已把草案补全为可确认的配置。",
+              "draft": {
+                "kind": "create_prompt_preset",
+                "title": "创建现代中文叙事",
+                "summary": "创建翻译提示词预设。",
+                "payload": {
+                  "kind": "translation",
+                  "name": "现代中文叙事",
+                  "description": "现代中文小说叙事提示词",
+                  "system_prompt": "请用自然现代中文翻译，避免源语言残留。",
+                  "enabled": true
+                }
+              }
+            }
+            """,
+        ]
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call("agent.send_message", {"message": "创建一个翻译 prompt"})
+    workspace = response["workspace"]
+
+    assert workspace["messages"][-1]["content"] == "我已把草案补全为可确认的配置。"
+    assert workspace["pending_draft"]["kind"] == "create_prompt_preset"  # type: ignore[index]
+    assert workspace["pending_draft"]["payload"]["name"] == "现代中文叙事"  # type: ignore[index]
+    assert len(fake.requests) == 2
+    assert fake.requests[1].log_label == "agent draft validation repair"
+
+
+def test_empty_prompt_payload_can_be_salvaged_after_repair_stays_empty(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = SequenceAgentClient(
+        [
+            """
+            {
+              "reply": "我已起草。",
+              "draft": {
+                "kind": "create_prompt_preset",
+                "title": "创建翻译 Prompt：现代中文叙事",
+                "summary": "创建现代中文叙事翻译提示词。",
+                "payload": {}
+              }
+            }
+            """,
+            """
+            {
+              "reply": "我已起草现代中文叙事。",
+              "draft": {
+                "kind": "create_prompt_preset",
+                "title": "创建翻译 Prompt：现代中文叙事",
+                "summary": "创建现代中文叙事翻译提示词。",
+                "payload": {}
+              }
+            }
+            """,
+        ]
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "帮我创建一个翻译用的 prompt 预设，名字叫『现代中文叙事』。"},
+    )
+    draft = response["workspace"]["pending_draft"]
+
+    assert draft["kind"] == "create_prompt_preset"
+    assert draft["payload"]["kind"] == "translation"
+    assert draft["payload"]["name"] == "现代中文叙事"
+    assert draft["payload"]["system_prompt"]
+    assert "补齐为可确认的配置草案" in response["workspace"]["messages"][-1]["content"]
+
+
+def test_empty_recipe_payload_can_be_salvaged_after_repair_stays_empty(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = SequenceAgentClient(
+        [
+            """
+            {
+              "reply": "我已起草。",
+              "draft": {
+                "kind": "create_recipe",
+                "title": "创建配方『本地测试』",
+                "summary": "保存当前配置。",
+                "payload": {}
+              }
+            }
+            """,
+            """
+            {
+              "reply": "我已起草本地测试配方。",
+              "draft": {
+                "kind": "create_recipe",
+                "title": "创建配方『本地测试』",
+                "summary": "保存当前配置。",
+                "payload": {}
+              }
+            }
+            """,
+        ]
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"translation": "profile-workflow"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "把当前模型和阶段选择存成一个叫『本地测试』的配方。"},
+    )
+    draft = response["workspace"]["pending_draft"]
+
+    assert draft["kind"] == "create_recipe"
+    assert draft["payload"]["name"] == "本地测试"
+    assert draft["payload"]["stage_model_ids"]["translation"] == "profile-workflow"
+    assert "补齐为可确认的配置草案" in response["workspace"]["messages"][-1]["content"]
 
 
 def test_invalid_draft_kind_is_not_stored(tmp_path: Path) -> None:
@@ -854,6 +1067,106 @@ def test_agent_start_translation_draft_applies_with_task_lock(
     assert settings.translation.output_folder == ""
 
 
+def test_agent_compound_draft_can_fill_recipe_and_start_translation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_start_agent_task(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        service = kwargs["task_service"]
+        assert isinstance(service, TaskService)
+        service.cache.save_task(
+            TaskRecord(
+                id="translation-agent-compound",
+                kind=TaskKind.TRANSLATION,
+                status=TaskStatus.RUNNING,
+            )
+        )
+        return {
+            "task_id": "translation-agent-compound",
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        "transoria.bridge.handlers.agent.start_agent_task",
+        fake_start_agent_task,
+    )
+    input_dir = tmp_path / "novel"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "book.txt").write_text("source text", encoding="utf-8")
+    router, _ = _router_with_workflow(
+        tmp_path,
+        f"""
+        {{
+          "reply": "I prepared one proposal to configure and start translation.",
+          "draft": {{
+            "kind": "compound_config_update",
+            "title": "Configure and start translation",
+            "summary": "Fills the translation recipe slots and starts translation.",
+            "payload": {{
+              "actions": [
+                {{
+                  "kind": "update_workspace",
+                  "title": "Fill translation slots",
+                  "summary": "Selects the model and prompt for this run.",
+                  "payload": {{
+                    "stage_model_ids": {{"translation": "profile-workflow"}},
+                    "stage_prompt_ids": {{
+                      "translation": "{DEFAULT_TRANSLATION_PRESET_ID}"
+                    }}
+                  }}
+                }},
+                {{
+                  "kind": "start_translation_task",
+                  "title": "Start translation",
+                  "summary": "Uses chat-provided per-task paths.",
+                  "payload": {{
+                    "input_dir": "{input_dir}",
+                    "output_dir": "{output_dir}",
+                    "source_language": "kr",
+                    "target_language": "zh"
+                  }}
+                }}
+              ]
+            }}
+          }}
+        }}
+        """,
+    )
+
+    draft = router.call(
+        "agent.send_message",
+        {"message": "把翻译模型和 prompt 配好，然后用这些目录开始翻译"},
+    )["workspace"]["pending_draft"]
+
+    assert draft["kind"] == "compound_config_update"
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+    workspace = applied["workspace"]
+
+    assert workspace["active_task"] == {
+        "task_id": "translation-agent-compound",
+        "kind": "translation",
+        "conversation_id": workspace["active_conversation_id"],
+        "started_at": "2026-01-01T00:00:00+00:00",
+    }
+    assert captured["draft_kind"] == "start_translation_task"
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["input_dir"] == str(input_dir)
+    assert [item["kind"] for item in applied["result"]["results"]] == [
+        "update_workspace",
+        "start_translation_task",
+    ]
+    settings = default_store(tmp_path).load_all()
+    assert settings.translation.input_folder == ""
+    assert settings.translation.output_folder == ""
+
+
 def test_agent_start_translation_draft_is_dropped_when_recipe_incomplete(
     tmp_path: Path,
 ) -> None:
@@ -1080,9 +1393,33 @@ def test_send_message_calls_api_with_system_prompt_and_inventory(
     assert request.model.id == "profile-workflow"
     assert request.system_prompt == AGENT_SYSTEM_PROMPT
     assert request.stream is False
+    assert request.json_response_schema is not None
+    assert request.json_response_schema_name == "agent_configuration_response"
     # The user prompt carries the inventory and the user's message.
     assert "profile-workflow" in request.user_prompt
     assert "configure things" in request.user_prompt
+
+
+def test_send_message_falls_back_when_schema_request_is_rejected(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = FallbackAgentClient(
+        LlmRequestError("unsupported response_format", code="llm.http_error"),
+        '{"reply":"ok","draft":null}',
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call("agent.send_message", {"message": "configure things"})
+
+    assert response["workspace"]["messages"][-1]["content"] == "ok"
+    assert len(fake.requests) == 2
+    assert fake.requests[0].json_response_schema is not None
+    assert fake.requests[1].json_response_schema is None
 
 
 def test_send_message_skips_api_when_workflow_profile_missing(tmp_path: Path) -> None:
@@ -1189,6 +1526,71 @@ def test_agent_drafts_model_selection_and_apply(tmp_path: Path) -> None:
 
     applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})["workspace"]
     assert applied["stage_model_ids"]["translation"] == "profile-workflow"
+
+
+def test_agent_compound_draft_applies_workspace_and_model_profile_updates(
+    tmp_path: Path,
+) -> None:
+    router, _ = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "I prepared one proposal with both changes.",
+          "draft": {
+            "kind": "compound_config_update",
+            "title": "Update translation setup",
+            "summary": "Selects the translation model and updates model limits.",
+            "payload": {
+              "actions": [
+                {
+                  "kind": "update_workspace",
+                  "title": "Select translation model",
+                  "summary": "Use Workflow for translation.",
+                  "payload": {
+                    "stage_model_ids": {"translation": "profile-workflow"}
+                  }
+                },
+                {
+                  "kind": "update_model_profile",
+                  "title": "Update model limits",
+                  "summary": "Raises concurrency for the selected model.",
+                  "payload": {
+                    "profile_id": "profile-workflow",
+                    "patch": {
+                      "concurrency_limit": 7,
+                      "rpm_limit": 90
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+        """,
+    )
+
+    draft = router.call(
+        "agent.send_message",
+        {"message": "翻译模型用 Workflow，并把并发改成 7，RPM 改成 90"},
+    )["workspace"]["pending_draft"]
+
+    assert draft["kind"] == "compound_config_update"
+    before = ModelProfileStore.from_cache_root(tmp_path).get("profile-workflow")
+    assert before is not None
+    assert before.concurrency_limit == 3
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    workspace = applied["workspace"]
+    assert workspace["stage_model_ids"]["translation"] == "profile-workflow"
+    stored = ModelProfileStore.from_cache_root(tmp_path).get("profile-workflow")
+    assert stored is not None
+    assert stored.concurrency_limit == 7
+    assert stored.rpm_limit == 90
+    assert [item["kind"] for item in applied["result"]["results"]] == [
+        "update_workspace",
+        "update_model_profile",
+    ]
 
 
 def test_agent_model_draft_with_unknown_profile_is_dropped(tmp_path: Path) -> None:
@@ -2030,6 +2432,71 @@ def test_prompt_preset_draft_accepts_stage_and_prompt_aliases(tmp_path: Path) ->
 
     assert applied["result"]["preset"]["kind"] == "glossary_review"
     assert applied["result"]["preset"]["system_prompt"] == "Review terms carefully."
+
+
+def test_prompt_preset_draft_accepts_chinese_prompt_kind_alias(
+    tmp_path: Path,
+) -> None:
+    router, _ = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "Drafting.",
+          "draft": {
+            "kind": "create_prompt_preset",
+            "title": "Chinese alias prompt",
+            "summary": "uses a Chinese kind alias",
+            "payload": {
+              "kind": "翻译用 Prompt",
+              "name": "现代中文叙事",
+              "prompt": "Translate into modern Chinese narration.",
+              "enabled": true
+            }
+          }
+        }
+        """,
+    )
+    draft = router.call("agent.send_message", {"message": "make a prompt"})[
+        "workspace"
+    ]["pending_draft"]
+
+    assert draft["kind"] == "create_prompt_preset"
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    assert applied["result"]["preset"]["kind"] == "translation"
+    assert applied["result"]["preset"]["name"] == "现代中文叙事"
+
+
+def test_create_recipe_draft_accepts_wrapped_recipe_payload(
+    tmp_path: Path,
+) -> None:
+    router, _ = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "Drafting.",
+          "draft": {
+            "kind": "create_recipe",
+            "title": "Create recipe",
+            "summary": "uses a wrapped recipe payload",
+            "payload": {
+              "recipe": {
+                "recipe_name": "本地测试",
+                "description": "Use current stage selections."
+              }
+            }
+          }
+        }
+        """,
+    )
+    draft = router.call("agent.send_message", {"message": "make a recipe"})[
+        "workspace"
+    ]["pending_draft"]
+
+    assert draft["kind"] == "create_recipe"
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    assert applied["result"]["recipe"]["name"] == "本地测试"
 
 
 def test_apply_draft_with_corrupted_cache_kind_raises(tmp_path: Path) -> None:

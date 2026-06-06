@@ -8,6 +8,50 @@ from typing import Mapping
 
 from transoria.agent.schemas import AgentActionDraft
 
+AGENT_RESPONSE_JSON_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["reply", "draft"],
+    "properties": {
+        "reply": {"type": "string"},
+        "draft": {
+            "anyOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["kind", "title", "summary", "payload"],
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "title": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "payload": {
+                            "type": "object",
+                            "description": (
+                                "Non-empty action payload. Include all fields required "
+                                "by the action kind; do not leave this empty when draft "
+                                "is not null."
+                            ),
+                            "additionalProperties": True,
+                        },
+                    },
+                },
+            ]
+        },
+    },
+}
+
+AGENT_REPAIR_SYSTEM_PROMPT = """\
+You repair Agent Lab configuration-agent output into the required JSON
+protocol. Return compact JSON only. Do not add explanations outside JSON.
+
+If the raw output contains a user-facing reply, put it in "reply". If it
+contains a configuration draft, normalize it into "draft" with kind, title,
+summary, and payload. If it does not contain a clear supported draft, return
+"draft": null. Never invent missing ids, API keys, directories, languages, or
+task ids.
+"""
+
 AGENT_SYSTEM_PROMPT = """\
 You are the built-in Transoria Agent Lab workflow configuration agent.
 
@@ -32,6 +76,9 @@ Allowed draft actions:
   user explicitly provides them in the current conversation.
 - update_model_profile: update one model profile. Include api_keys only when the
   user explicitly provides them in the current conversation.
+- compound_config_update: one confirmed proposal containing multiple registered
+  actions when the user's single request clearly asks for several related
+  configuration changes.
 - start_glossary_task: start glossary extraction after user confirmation.
 - start_glossary_review_task: start glossary review from one glossary task id
   after user confirmation.
@@ -48,8 +95,9 @@ provided inventory and current_state only.
 
 Configuration reliability rules:
 - First explain what you are about to create or change, then include exactly
-  one draft. If a user request implies multiple independent changes, either
-  draft the single most central change or ask which one to do first.
+  one draft. If a user request clearly asks for multiple related configuration
+  changes, use one compound_config_update draft with an "actions" array instead
+  of splitting the request across multiple confirmations.
 - If the user is adjusting an existing pending draft, return one revised draft
   for the same pending operation unless they explicitly ask for a different
   operation. Do not claim the original draft was applied, saved, or changed in
@@ -124,6 +172,42 @@ Or with one draft:
         "term_extract": "prompt-id or null",
         "term_review": "prompt-id or null"
       }
+    }
+  }
+}
+
+Or:
+{
+  "reply": "short user-facing reply",
+  "draft": {
+    "kind": "compound_config_update",
+    "title": "Draft title",
+    "summary": "What group of changes will be applied",
+    "payload": {
+      "actions": [
+        {
+          "kind": "update_workspace",
+          "title": "Select workflow model",
+          "summary": "Select model/profile slots",
+          "payload": {
+            "workflow_model_id": "profile-id or null",
+            "stage_model_ids": {
+              "translation": "profile-id or null",
+              "term_extract": "profile-id or null",
+              "term_review": "profile-id or null"
+            }
+          }
+        },
+        {
+          "kind": "update_model_profile",
+          "title": "Update concurrency",
+          "summary": "Change model runtime limits",
+          "payload": {
+            "profile_id": "existing-profile-id",
+            "patch": {"concurrency_limit": 4}
+          }
+        }
+      ]
     }
   }
 }
@@ -337,12 +421,80 @@ def build_user_prompt(
     )
 
 
-def parse_agent_response(content: str) -> tuple[str, AgentActionDraft | None]:
+class AgentResponseParseError(ValueError):
+    """Raised when a model response cannot satisfy the Agent Lab draft protocol."""
+
+
+def build_repair_prompt(*, user_message: str, raw_response: str) -> str:
+    return "\n\n".join(
+        (
+            "User request:",
+            user_message,
+            "Raw model output to repair:",
+            raw_response,
+            "Required output shape:",
+            json.dumps(AGENT_RESPONSE_JSON_SCHEMA, ensure_ascii=False, indent=2),
+        )
+    )
+
+
+def build_validation_repair_prompt(
+    *,
+    user_message: str,
+    invalid_reply: str,
+    invalid_draft: AgentActionDraft,
+    validation_error: str,
+    inventory: Mapping[str, object],
+    current_state: Mapping[str, object],
+) -> str:
+    return "\n\n".join(
+        (
+            "The previous output was valid JSON, but its draft failed backend validation.",
+            "Repair the draft so it can be shown to the user as a confirmation proposal.",
+            "Return compact JSON only. Do not claim anything was applied.",
+            "If the user request lacks required information, return draft null and ask a concise follow-up.",
+            "Never invent ids, API keys, directories, languages, task ids, or unavailable model/prompt ids.",
+            "User request:",
+            user_message,
+            "Validation error:",
+            validation_error,
+            "Invalid reply:",
+            invalid_reply,
+            "Invalid draft:",
+            json.dumps(
+                {
+                    "kind": invalid_draft.kind,
+                    "title": invalid_draft.title,
+                    "summary": invalid_draft.summary,
+                    "payload": invalid_draft.payload,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "Current Agent Lab workspace state:",
+            json.dumps(current_state, ensure_ascii=False, indent=2),
+            "Available inventory:",
+            json.dumps(inventory, ensure_ascii=False, indent=2),
+            "Required output shape:",
+            json.dumps(AGENT_RESPONSE_JSON_SCHEMA, ensure_ascii=False, indent=2),
+        )
+    )
+
+
+def parse_agent_response(
+    content: str,
+    *,
+    require_json: bool = False,
+) -> tuple[str, AgentActionDraft | None]:
     try:
         payload = _loads_json_object(content)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        if require_json:
+            raise AgentResponseParseError("model response is not valid JSON") from exc
         return content.strip() or "I could not parse a configuration response.", None
     if not isinstance(payload, Mapping):
+        if require_json:
+            raise AgentResponseParseError("model response must be a JSON object")
         return content.strip() or "I could not parse a configuration response.", None
     reply = str(payload.get("reply") or "").strip()
     if not reply:
@@ -351,12 +503,16 @@ def parse_agent_response(content: str) -> tuple[str, AgentActionDraft | None]:
     if draft_raw is None:
         return reply, None
     if not isinstance(draft_raw, Mapping):
+        if require_json:
+            raise AgentResponseParseError("draft must be null or a JSON object")
         return reply, None
     kind = str(draft_raw.get("kind") or "")
     title = str(draft_raw.get("title") or "Configuration draft")
     summary = str(draft_raw.get("summary") or "")
     draft_payload = draft_raw.get("payload")
     if not isinstance(draft_payload, Mapping):
+        if require_json:
+            raise AgentResponseParseError("draft payload must be a JSON object")
         return reply, None
     return reply, AgentActionDraft.create(
         kind=kind,

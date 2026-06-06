@@ -139,3 +139,41 @@ def test_google_generation_config_includes_thinking_when_enabled() -> None:
     # MEDIUM maps to 768 by the level ladder; the user's 8000 only
     # acts as an upper bound.
     assert payload["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 768
+
+
+def test_google_generation_config_includes_json_schema_response_format() -> None:
+    body = {
+        "candidates": [{"content": {"parts": [{"text": '{"reply":"ok"}'}]}}],
+        "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1},
+    }
+    transport = FakeTransport(responses=[TransportResult(200, body)])
+    schema = {
+        "type": "object",
+        "properties": {"reply": {"type": "string"}},
+        "required": ["reply"],
+    }
+    model = ModelConfig(
+        id="m",
+        display_name="m",
+        provider_format=ProviderFormat.GOOGLE,
+        base_url="https://generativelanguage.googleapis.com",
+        model_id="gemini-2.5-pro",
+        api_keys=("k",),
+    )
+    client = LlmClient(transport=transport)
+
+    asyncio.run(
+        client.chat(
+            ChatRequest(
+                model=model,
+                system_prompt="",
+                user_prompt="x",
+                json_response_schema=schema,
+                json_response_schema_name="agent_configuration_response",
+            )
+        )
+    )
+
+    generation_config = transport.captured[0]["generationConfig"]
+    assert generation_config["responseMimeType"] == "application/json"
+    assert generation_config["responseSchema"] == schema

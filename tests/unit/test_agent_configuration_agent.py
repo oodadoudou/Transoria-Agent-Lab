@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from transoria.agent.configuration_agent import (
+    AGENT_RESPONSE_JSON_SCHEMA,
     AGENT_SYSTEM_PROMPT,
+    AgentResponseParseError,
+    build_repair_prompt,
+    build_validation_repair_prompt,
     build_user_prompt,
     parse_agent_response,
 )
+from transoria.agent.schemas import AgentActionDraft
 
 
 def test_parse_plain_json_object() -> None:
@@ -62,11 +67,30 @@ def test_parse_non_json_falls_back_to_text() -> None:
     assert draft is None
 
 
+def test_strict_parse_rejects_non_json() -> None:
+    try:
+        parse_agent_response("just talking, no json here", require_json=True)
+    except AgentResponseParseError as exc:
+        assert "valid JSON" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("strict parse should reject non-JSON output")
+
+
 def test_parse_draft_without_payload_is_dropped() -> None:
     content = '{"reply": "x", "draft": {"kind": "update_memory", "title": "t"}}'
     reply, draft = parse_agent_response(content)
     assert reply == "x"
     assert draft is None
+
+
+def test_strict_parse_rejects_draft_without_payload() -> None:
+    content = '{"reply": "x", "draft": {"kind": "update_memory", "title": "t"}}'
+    try:
+        parse_agent_response(content, require_json=True)
+    except AgentResponseParseError as exc:
+        assert "payload" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("strict parse should reject malformed drafts")
 
 
 def test_parse_fenced_json_without_language_tag() -> None:
@@ -144,3 +168,39 @@ def test_build_user_prompt_includes_response_checklist() -> None:
     assert "Ask a follow-up instead of inventing missing config." in prompt
     assert "Warn about weak/low-cost models" in prompt
     assert "配置一个翻译 preset" in prompt
+
+
+def test_repair_prompt_includes_raw_output_and_schema() -> None:
+    prompt = build_repair_prompt(
+        user_message="创建一个 prompt",
+        raw_response='{"reply": "broken", "draft":',
+    )
+
+    assert "创建一个 prompt" in prompt
+    assert '"reply": "broken"' in prompt
+    assert "Required output shape:" in prompt
+    assert "draft" in str(AGENT_RESPONSE_JSON_SCHEMA["properties"])
+
+
+def test_validation_repair_prompt_includes_invalid_draft_context() -> None:
+    draft = AgentActionDraft.create(
+        kind="create_prompt_preset",
+        title="Create Prompt",
+        summary="empty payload",
+        payload={},
+    )
+
+    prompt = build_validation_repair_prompt(
+        user_message="创建一个翻译 prompt",
+        invalid_reply="我已起草。",
+        invalid_draft=draft,
+        validation_error="kind is required",
+        inventory={"models": []},
+        current_state={"workflow_model_id": "profile-workflow"},
+    )
+
+    assert "draft failed backend validation" in prompt
+    assert "kind is required" in prompt
+    assert "创建一个翻译 prompt" in prompt
+    assert '"payload": {}' in prompt
+    assert '"workflow_model_id": "profile-workflow"' in prompt
