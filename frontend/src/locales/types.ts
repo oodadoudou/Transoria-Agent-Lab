@@ -379,6 +379,15 @@ export interface Messages {
     untitledConversation: string;
     renameConversation: string;
     deleteConversation: string;
+    recipesTitle: string;
+    recipesSub: string;
+    recipeNamePlaceholder: string;
+    recipeSaveCurrent: string;
+    recipeApply: string;
+    recipeUpdateStages: string;
+    recipeRename: string;
+    recipeDelete: string;
+    recipeEmpty: string;
   };
   translation: {
     crumb: string;

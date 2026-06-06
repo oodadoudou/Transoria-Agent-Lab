@@ -226,6 +226,84 @@ class AgentConversation:
 
 
 @dataclass(frozen=True)
+class AgentRecipe:
+    """A named, savable bundle of stage model + prompt choices."""
+
+    id: str
+    name: str
+    description: str
+    stage_model_ids: Mapping[str, str | None]
+    stage_prompt_ids: Mapping[str, str | None]
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        name: str,
+        description: str = "",
+        stage_model_ids: Mapping[str, str | None] | None = None,
+        stage_prompt_ids: Mapping[str, str | None] | None = None,
+    ) -> "AgentRecipe":
+        timestamp = now_iso()
+        return cls(
+            id=new_id("recipe"),
+            name=name,
+            description=description,
+            stage_model_ids=_full_slot_mapping(stage_model_ids, MODEL_SLOTS),
+            stage_prompt_ids=_full_slot_mapping(stage_prompt_ids, PROMPT_SLOTS),
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "AgentRecipe":
+        created_at = str(data.get("created_at") or now_iso())
+        return cls(
+            id=str(data.get("id") or new_id("recipe")),
+            name=str(data.get("name") or ""),
+            description=str(data.get("description") or ""),
+            stage_model_ids=_slot_mapping(data.get("stage_model_ids"), MODEL_SLOTS),
+            stage_prompt_ids=_slot_mapping(data.get("stage_prompt_ids"), PROMPT_SLOTS),
+            created_at=created_at,
+            updated_at=str(data.get("updated_at") or created_at),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "stage_model_ids": dict(self.stage_model_ids),
+            "stage_prompt_ids": dict(self.stage_prompt_ids),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    def with_updates(
+        self,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        stage_model_ids: Mapping[str, str | None] | None = None,
+        stage_prompt_ids: Mapping[str, str | None] | None = None,
+    ) -> "AgentRecipe":
+        return replace(
+            self,
+            name=name if name is not None else self.name,
+            description=description if description is not None else self.description,
+            stage_model_ids=_full_slot_mapping(stage_model_ids, MODEL_SLOTS)
+            if stage_model_ids is not None
+            else self.stage_model_ids,
+            stage_prompt_ids=_full_slot_mapping(stage_prompt_ids, PROMPT_SLOTS)
+            if stage_prompt_ids is not None
+            else self.stage_prompt_ids,
+            updated_at=now_iso(),
+        )
+
+
+@dataclass(frozen=True)
 class AgentWorkspaceState:
     workflow_model_id: str | None = None
     stage_model_ids: Mapping[str, str | None] = field(
@@ -235,6 +313,7 @@ class AgentWorkspaceState:
         default_factory=lambda: {slot: None for slot in PROMPT_SLOTS}
     )
     memories: tuple[str, ...] = ()
+    recipes: tuple[AgentRecipe, ...] = ()
     conversations: tuple[AgentConversation, ...] = ()
     active_conversation_id: str | None = None
     updated_at: str = field(default_factory=now_iso)
@@ -255,6 +334,7 @@ class AgentWorkspaceState:
             stage_model_ids=_slot_mapping(data.get("stage_model_ids"), MODEL_SLOTS),
             stage_prompt_ids=_slot_mapping(data.get("stage_prompt_ids"), PROMPT_SLOTS),
             memories=_memories_from(data.get("memories")),
+            recipes=_recipes_from(data.get("recipes")),
             conversations=conversations,
             active_conversation_id=active_id,
             updated_at=str(data.get("updated_at") or now_iso()),
@@ -266,6 +346,7 @@ class AgentWorkspaceState:
             "stage_model_ids": dict(self.stage_model_ids),
             "stage_prompt_ids": dict(self.stage_prompt_ids),
             "memories": list(self.memories),
+            "recipes": [recipe.to_dict() for recipe in self.recipes],
             "conversations": [
                 conversation.to_dict() for conversation in self.conversations
             ],
@@ -362,6 +443,30 @@ class AgentWorkspaceState:
     def with_memories(self, memories: tuple[str, ...]) -> "AgentWorkspaceState":
         return replace(self, memories=memories, updated_at=now_iso())
 
+    def get_recipe(self, recipe_id: str) -> AgentRecipe | None:
+        for recipe in self.recipes:
+            if recipe.id == recipe_id:
+                return recipe
+        return None
+
+    def add_recipe(self, recipe: AgentRecipe) -> "AgentWorkspaceState":
+        return replace(
+            self, recipes=(*self.recipes, recipe), updated_at=now_iso()
+        )
+
+    def replace_recipe(self, recipe: AgentRecipe) -> "AgentWorkspaceState":
+        recipes = tuple(
+            recipe if existing.id == recipe.id else existing
+            for existing in self.recipes
+        )
+        return replace(self, recipes=recipes, updated_at=now_iso())
+
+    def remove_recipe(self, recipe_id: str) -> "AgentWorkspaceState":
+        recipes = tuple(
+            recipe for recipe in self.recipes if recipe.id != recipe_id
+        )
+        return replace(self, recipes=recipes, updated_at=now_iso())
+
 
 def _messages_from(value: object) -> tuple[AgentMessage, ...]:
     if not isinstance(value, list):
@@ -385,6 +490,25 @@ def _memories_from(value: object) -> tuple[str, ...]:
     return tuple(
         item.strip() for item in value if isinstance(item, str) and item.strip()
     )
+
+
+def _recipes_from(value: object) -> tuple[AgentRecipe, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(
+        AgentRecipe.from_dict(item) for item in value if isinstance(item, Mapping)
+    )
+
+
+def _full_slot_mapping(
+    value: Mapping[str, str | None] | None, slots: tuple[str, ...]
+) -> dict[str, str | None]:
+    """Normalize a (possibly partial) slot map into one with every slot present."""
+    result: dict[str, str | None] = {slot: None for slot in slots}
+    if isinstance(value, Mapping):
+        for slot in slots:
+            result[slot] = _optional_str(value.get(slot))
+    return result
 
 
 def _conversations_from(

@@ -20,6 +20,8 @@ Allowed draft actions:
 - create_prompt_preset: create one prompt preset for translation, glossary, or glossary_review.
 - update_memory: replace the lightweight confirmed memory list with concise user
   preferences relevant to translation workflow quality.
+- create_recipe: save a named bundle of stage model + stage prompt choices so the
+  user can reuse and switch between pipeline configurations.
 
 Do not draft translation execution, glossary extraction, proofreading edits, or
 file overwrite actions. Those stages are not wired yet.
@@ -81,6 +83,30 @@ Or:
       "memories": [
         "Concise confirmed preference or project rule"
       ]
+    }
+  }
+}
+
+Or:
+{
+  "reply": "short user-facing reply",
+  "draft": {
+    "kind": "create_recipe",
+    "title": "Draft title",
+    "summary": "What recipe will be saved",
+    "payload": {
+      "name": "recipe name",
+      "description": "short description",
+      "stage_model_ids": {
+        "translation": "profile-id or null",
+        "term_extract": "profile-id or null",
+        "term_review": "profile-id or null"
+      },
+      "stage_prompt_ids": {
+        "translation": "prompt-id or null",
+        "term_extract": "prompt-id or null",
+        "term_review": "prompt-id or null"
+      }
     }
   }
 }

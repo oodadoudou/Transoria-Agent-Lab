@@ -2,6 +2,7 @@ import { getTransport } from "./transport";
 import { nativeDialogs } from "./native";
 import type {
   AllSettings,
+  AgentRecipeInput,
   AgentWorkspace,
   AgentWorkspaceResponse,
   AppMetadata,
@@ -307,6 +308,21 @@ export const agentBridge = {
   },
   deleteMemory(memory: string): Promise<AgentWorkspaceResponse> {
     return call("agent.delete_memory", { memory });
+  },
+  createRecipe(input: AgentRecipeInput): Promise<AgentWorkspaceResponse> {
+    return call("agent.create_recipe", { ...input });
+  },
+  updateRecipe(
+    recipeId: string,
+    patch: Partial<AgentRecipeInput>,
+  ): Promise<AgentWorkspaceResponse> {
+    return call("agent.update_recipe", { recipe_id: recipeId, ...patch });
+  },
+  deleteRecipe(recipeId: string): Promise<AgentWorkspaceResponse> {
+    return call("agent.delete_recipe", { recipe_id: recipeId });
+  },
+  applyRecipe(recipeId: string): Promise<AgentWorkspaceResponse> {
+    return call("agent.apply_recipe", { recipe_id: recipeId });
   },
 };
 

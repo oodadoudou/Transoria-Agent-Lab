@@ -61,6 +61,9 @@ export function WorkspacePage() {
     null,
   );
   const [editingMemoryText, setEditingMemoryText] = useState("");
+  const [newRecipeName, setNewRecipeName] = useState("");
+  const [editingRecipeId, setEditingRecipeId] = useState<string | null>(null);
+  const [editingRecipeName, setEditingRecipeName] = useState("");
 
   const applyResponse = (response: AgentWorkspaceResponse) => {
     setWorkspace(response.workspace);
@@ -222,6 +225,46 @@ export function WorkspacePage() {
       ? current.map((memory, i) => (i === index ? text : memory))
       : current.filter((_, i) => i !== index);
     await run(() => agentBridge.updateMemory(next));
+  };
+
+  const saveCurrentAsRecipe = async () => {
+    const name = newRecipeName.trim();
+    if (!name) return;
+    setNewRecipeName("");
+    await run(() =>
+      agentBridge.createRecipe({
+        name,
+        stage_model_ids: workspace?.stage_model_ids,
+        stage_prompt_ids: workspace?.stage_prompt_ids,
+      }),
+    );
+  };
+
+  const applyRecipe = (id: string) =>
+    void run(() => agentBridge.applyRecipe(id));
+
+  const updateRecipeStages = (id: string) =>
+    void run(() =>
+      agentBridge.updateRecipe(id, {
+        stage_model_ids: workspace?.stage_model_ids,
+        stage_prompt_ids: workspace?.stage_prompt_ids,
+      }),
+    );
+
+  const deleteRecipe = (id: string) =>
+    void run(() => agentBridge.deleteRecipe(id));
+
+  const startRecipeRename = (id: string, name: string) => {
+    setEditingRecipeId(id);
+    setEditingRecipeName(name);
+  };
+
+  const commitRecipeRename = async () => {
+    const id = editingRecipeId;
+    const name = editingRecipeName.trim();
+    setEditingRecipeId(null);
+    if (!id || !name) return;
+    await run(() => agentBridge.updateRecipe(id, { name }));
   };
 
   const promptOptions = useMemo(() => {
@@ -399,6 +442,100 @@ export function WorkspacePage() {
                   }
                 />
               ))}
+            </div>
+          </Panel>
+
+          <Panel label={t.recipesTitle} subtitle={t.recipesSub}>
+            <div className={styles.stack}>
+              <div className={styles.memoryAdd}>
+                <input
+                  className={styles.inlineInput}
+                  value={newRecipeName}
+                  placeholder={t.recipeNamePlaceholder}
+                  disabled={busy || !workspace}
+                  onChange={(event) => setNewRecipeName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void saveCurrentAsRecipe();
+                    }
+                  }}
+                />
+                <Pill
+                  disabled={busy || !newRecipeName.trim()}
+                  onClick={() => void saveCurrentAsRecipe()}
+                >
+                  {t.recipeSaveCurrent}
+                </Pill>
+              </div>
+              {workspace?.recipes.length ? (
+                <div className={styles.convList}>
+                  {workspace.recipes.map((recipe) => (
+                    <div key={recipe.id} className={styles.convItem}>
+                      {editingRecipeId === recipe.id ? (
+                        <input
+                          className={styles.inlineInput}
+                          value={editingRecipeName}
+                          autoFocus
+                          disabled={busy}
+                          onChange={(event) =>
+                            setEditingRecipeName(event.target.value)
+                          }
+                          onBlur={() => void commitRecipeRename()}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void commitRecipeRename();
+                            } else if (event.key === "Escape") {
+                              setEditingRecipeId(null);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <div className={styles.convName}>{recipe.name}</div>
+                      )}
+                      <div className={styles.convActions}>
+                        <button
+                          type="button"
+                          className={styles.linkButton}
+                          disabled={busy}
+                          onClick={() => applyRecipe(recipe.id)}
+                        >
+                          {t.recipeApply}
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.linkButton}
+                          disabled={busy}
+                          onClick={() => updateRecipeStages(recipe.id)}
+                        >
+                          {t.recipeUpdateStages}
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.linkButton}
+                          disabled={busy}
+                          onClick={() =>
+                            startRecipeRename(recipe.id, recipe.name)
+                          }
+                        >
+                          {t.recipeRename}
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.linkButton}
+                          disabled={busy}
+                          onClick={() => deleteRecipe(recipe.id)}
+                        >
+                          {t.recipeDelete}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className={styles.empty}>{t.recipeEmpty}</div>
+              )}
             </div>
           </Panel>
         </div>

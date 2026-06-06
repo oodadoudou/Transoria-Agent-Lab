@@ -634,6 +634,16 @@ export const en: Messages = {
     untitledConversation: "Untitled conversation",
     renameConversation: "Rename",
     deleteConversation: "Delete",
+    recipesTitle: "Recipes",
+    recipesSub:
+      "Save the current per-stage model and prompt choices as a reusable recipe; applying one overwrites the current stage selections.",
+    recipeNamePlaceholder: "Recipe name, e.g. Cheap bulk / High-quality review",
+    recipeSaveCurrent: "Save current",
+    recipeApply: "Apply",
+    recipeUpdateStages: "Update to current",
+    recipeRename: "Rename",
+    recipeDelete: "Delete",
+    recipeEmpty: "No recipes yet.",
   },
   translation: {
     crumb: "Translation",

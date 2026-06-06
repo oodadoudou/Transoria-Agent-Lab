@@ -19,6 +19,7 @@ from transoria.agent.schemas import (
     AgentActionDraft,
     AgentConversation,
     AgentMessage,
+    AgentRecipe,
     AgentWorkspaceState,
 )
 from transoria.bridge.errors import BridgeError
@@ -38,6 +39,9 @@ _PROMPT_KIND_BY_SLOT = {
 
 _MAX_TITLE_LENGTH = 120
 _MAX_CONTEXT_MESSAGES = 20
+_MAX_RECIPE_NAME_LENGTH = 120
+_MAX_RECIPE_DESCRIPTION_LENGTH = 400
+_MAX_RECIPES = 50
 
 
 def _build_handlers(
@@ -231,6 +235,91 @@ def _build_handlers(
         )
         return respond(state)
 
+    def create_recipe(payload: Mapping[str, object]) -> dict[str, object]:
+        name, description, stage_models, stage_prompts = _coerce_recipe_payload(
+            payload,
+            profile_store=profile_store,
+            cache_root=cache_root,
+        )
+
+        def updater(current: AgentWorkspaceState) -> AgentWorkspaceState:
+            if len(current.recipes) >= _MAX_RECIPES:
+                raise BridgeError.invalid_argument(
+                    "too many recipes.",
+                    field="recipes",
+                    details={"max_count": _MAX_RECIPES},
+                )
+            recipe = AgentRecipe.create(
+                name=name,
+                description=description,
+                stage_model_ids=stage_models,
+                stage_prompt_ids=stage_prompts,
+            )
+            return current.add_recipe(recipe)
+
+        return respond(project_store.update(updater))
+
+    def update_recipe(payload: Mapping[str, object]) -> dict[str, object]:
+        recipe_id = expect_string(payload, "recipe_id")
+        name, description, stage_models, stage_prompts = _coerce_recipe_payload(
+            payload,
+            profile_store=profile_store,
+            cache_root=cache_root,
+        )
+
+        def updater(current: AgentWorkspaceState) -> AgentWorkspaceState:
+            recipe = current.get_recipe(recipe_id)
+            if recipe is None:
+                raise BridgeError.not_found(
+                    f"recipe {recipe_id!r} does not exist.",
+                    details={"recipe_id": recipe_id},
+                )
+            return current.replace_recipe(
+                recipe.with_updates(
+                    name=name,
+                    description=description,
+                    stage_model_ids=stage_models,
+                    stage_prompt_ids=stage_prompts,
+                )
+            )
+
+        return respond(project_store.update(updater))
+
+    def delete_recipe(payload: Mapping[str, object]) -> dict[str, object]:
+        recipe_id = expect_string(payload, "recipe_id")
+
+        def updater(current: AgentWorkspaceState) -> AgentWorkspaceState:
+            if current.get_recipe(recipe_id) is None:
+                raise BridgeError.not_found(
+                    f"recipe {recipe_id!r} does not exist.",
+                    details={"recipe_id": recipe_id},
+                )
+            return current.remove_recipe(recipe_id)
+
+        return respond(project_store.update(updater))
+
+    def apply_recipe(payload: Mapping[str, object]) -> dict[str, object]:
+        recipe_id = expect_string(payload, "recipe_id")
+
+        def updater(current: AgentWorkspaceState) -> AgentWorkspaceState:
+            recipe = current.get_recipe(recipe_id)
+            if recipe is None:
+                raise BridgeError.not_found(
+                    f"recipe {recipe_id!r} does not exist.",
+                    details={"recipe_id": recipe_id},
+                )
+            return _apply_workspace_patch(
+                current,
+                {
+                    "stage_model_ids": dict(recipe.stage_model_ids),
+                    "stage_prompt_ids": dict(recipe.stage_prompt_ids),
+                },
+                profile_store=profile_store,
+                cache_root=cache_root,
+            )
+
+        return respond(project_store.update(updater))
+
     return {
         "agent.read_workspace": read_workspace,
         "agent.update_workspace": update_workspace,
@@ -243,6 +332,10 @@ def _build_handlers(
         "agent.delete_conversation": delete_conversation,
         "agent.update_memory": update_memory,
         "agent.delete_memory": delete_memory,
+        "agent.create_recipe": create_recipe,
+        "agent.update_recipe": update_recipe,
+        "agent.delete_recipe": delete_recipe,
+        "agent.apply_recipe": apply_recipe,
     }
 
 
@@ -366,7 +459,24 @@ def _apply_draft(
         memories = _coerce_memories_payload(draft.payload)
         next_state = state.with_memories(memories)
         return next_state, {"kind": draft.kind, "memory_count": len(memories)}
-    raise BridgeError.invalid_argument(
+    if draft.kind == "create_recipe":
+        name, description, stage_models, stage_prompts = _coerce_recipe_payload(
+            draft.payload,
+            profile_store=profile_store,
+            cache_root=cache_root,
+        )
+        recipe = AgentRecipe.create(
+            name=name,
+            description=description,
+            stage_model_ids=stage_models,
+            stage_prompt_ids=stage_prompts,
+        )
+        return state.add_recipe(recipe), {
+            "kind": draft.kind,
+            "recipe": recipe.to_dict(),
+        }
+    # Unreachable: _validate_draft above rejects unsupported kinds first.
+    raise BridgeError.invalid_argument(  # pragma: no cover
         f"unsupported draft kind: {draft.kind!r}",
         details={"kind": draft.kind},
     )
@@ -391,6 +501,13 @@ def _validate_draft(
         return
     if draft.kind == "update_memory":
         _coerce_memories_payload(draft.payload)
+        return
+    if draft.kind == "create_recipe":
+        _coerce_recipe_payload(
+            draft.payload,
+            profile_store=profile_store,
+            cache_root=cache_root,
+        )
         return
     raise BridgeError.invalid_argument(
         f"unsupported draft kind: {draft.kind!r}",
@@ -451,6 +568,41 @@ def _coerce_prompt_preset_payload(
         system_prompt,
         bool(payload.get("enabled", True)),
     )
+
+
+def _coerce_recipe_payload(
+    payload: Mapping[str, object],
+    *,
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+) -> tuple[str, str, dict[str, str | None], dict[str, str | None]]:
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise BridgeError.invalid_argument("name is required.", field="name")
+    if len(name) > _MAX_RECIPE_NAME_LENGTH:
+        raise BridgeError.invalid_argument(
+            "name is too long.",
+            field="name",
+            details={"max_length": _MAX_RECIPE_NAME_LENGTH},
+        )
+    description = str(payload.get("description") or "").strip()
+    if len(description) > _MAX_RECIPE_DESCRIPTION_LENGTH:
+        raise BridgeError.invalid_argument(
+            "description is too long.",
+            field="description",
+            details={"max_length": _MAX_RECIPE_DESCRIPTION_LENGTH},
+        )
+    stage_models = (
+        _coerce_model_slots(payload.get("stage_model_ids"), profile_store=profile_store)
+        if "stage_model_ids" in payload
+        else {}
+    )
+    stage_prompts = (
+        _coerce_prompt_slots(payload.get("stage_prompt_ids"), cache_root=cache_root)
+        if "stage_prompt_ids" in payload
+        else {}
+    )
+    return name, description, stage_models, stage_prompts
 
 
 def _coerce_memories_payload(payload: Mapping[str, object]) -> tuple[str, ...]:
@@ -569,7 +721,7 @@ def _optional_str(value: object) -> str | None:
 
 def _require_active(state: AgentWorkspaceState) -> AgentConversation:
     conversation = state.active()
-    if conversation is None:
+    if conversation is None:  # pragma: no cover - load() always reseeds one
         raise BridgeError.not_found("no active conversation exists.")
     return conversation
 
@@ -598,6 +750,7 @@ def _workspace_wire(state: AgentWorkspaceState) -> dict[str, object]:
         "stage_model_ids": dict(state.stage_model_ids),
         "stage_prompt_ids": dict(state.stage_prompt_ids),
         "memories": list(state.memories),
+        "recipes": [recipe.to_dict() for recipe in state.recipes],
         "active_conversation_id": state.active_conversation_id,
         "conversations": [
             _conversation_summary(conversation) for conversation in state.conversations
@@ -633,6 +786,10 @@ def _llm_context(state: AgentWorkspaceState) -> dict[str, object]:
         "stage_model_ids": dict(state.stage_model_ids),
         "stage_prompt_ids": dict(state.stage_prompt_ids),
         "memories": list(state.memories),
+        "recipes": [
+            {"id": recipe.id, "name": recipe.name, "description": recipe.description}
+            for recipe in state.recipes
+        ],
         "recent_messages": [
             {"role": message.role, "content": message.content} for message in recent
         ],

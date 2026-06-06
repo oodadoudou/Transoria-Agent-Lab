@@ -93,11 +93,29 @@ export interface AgentConversationSummary {
   updated_at: string;
 }
 
+export interface AgentRecipe {
+  id: string;
+  name: string;
+  description: string;
+  stage_model_ids: Record<AgentModelSlot, string | null>;
+  stage_prompt_ids: Record<AgentPromptSlot, string | null>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentRecipeInput {
+  name: string;
+  description?: string;
+  stage_model_ids?: Record<AgentModelSlot, string | null>;
+  stage_prompt_ids?: Record<AgentPromptSlot, string | null>;
+}
+
 export interface AgentWorkspace {
   workflow_model_id: string | null;
   stage_model_ids: Record<AgentModelSlot, string | null>;
   stage_prompt_ids: Record<AgentPromptSlot, string | null>;
   memories: string[];
+  recipes: AgentRecipe[];
   active_conversation_id: string | null;
   conversations: AgentConversationSummary[];
   messages: AgentMessage[];

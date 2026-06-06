@@ -615,6 +615,16 @@ export const zh: Messages = {
     untitledConversation: "未命名对话",
     renameConversation: "重命名",
     deleteConversation: "删除",
+    recipesTitle: "配方",
+    recipesSub:
+      "把当前各阶段的模型与 Prompt 选择存成可复用配方;应用配方会覆盖当前阶段选择。",
+    recipeNamePlaceholder: "配方名,例如:便宜量产 / 高质量校审",
+    recipeSaveCurrent: "存为配方",
+    recipeApply: "应用",
+    recipeUpdateStages: "更新为当前",
+    recipeRename: "重命名",
+    recipeDelete: "删除",
+    recipeEmpty: "暂无配方。",
   },
   translation: {
     crumb: "翻译",
