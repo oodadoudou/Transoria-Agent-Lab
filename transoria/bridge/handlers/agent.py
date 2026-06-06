@@ -107,7 +107,7 @@ def _build_handlers(
         state = _load_with_reconciled_active_task(project_store, task_service)
         return {
             "recipes": [recipe.to_dict() for recipe in state.recipes],
-            "active_recipe_id": _active_recipe_id(state),
+            "active_recipe_id": _resolved_active_recipe_id(state),
         }
 
     def get_active_task(_payload: Mapping[str, object]) -> dict[str, object]:
@@ -382,13 +382,19 @@ def _build_handlers(
                     f"recipe {recipe_id!r} does not exist.",
                     details={"recipe_id": recipe_id},
                 )
-            return current.replace_recipe(
-                recipe.with_updates(
-                    name=name,
-                    description=description,
-                    stage_model_ids=stage_models,
-                    stage_prompt_ids=stage_prompts,
-                )
+            updated = recipe.with_updates(
+                name=name,
+                description=description,
+                stage_model_ids=stage_models,
+                stage_prompt_ids=stage_prompts,
+            )
+            next_state = current.replace_recipe(updated)
+            if _resolved_active_recipe_id(current) != recipe_id:
+                return next_state
+            return next_state.with_config(
+                stage_model_ids=dict(updated.stage_model_ids),
+                stage_prompt_ids=dict(updated.stage_prompt_ids),
+                active_recipe_id=updated.id,
             )
 
         return respond(project_store.update(updater))
@@ -419,6 +425,7 @@ def _build_handlers(
             return _apply_workspace_patch(
                 current,
                 {
+                    "active_recipe_id": recipe.id,
                     "stage_model_ids": dict(recipe.stage_model_ids),
                     "stage_prompt_ids": dict(recipe.stage_prompt_ids),
                 },
@@ -570,11 +577,21 @@ def _apply_workspace_patch(
         stage_prompt_ids.update(
             _coerce_prompt_slots(patch.get("stage_prompt_ids"), cache_root=cache_root)
         )
+    active_recipe_id = state.active_recipe_id
+    stage_selection_touched = "stage_model_ids" in patch or "stage_prompt_ids" in patch
+    if "active_recipe_id" in patch:
+        active_recipe_id = _coerce_active_recipe_id(
+            patch.get("active_recipe_id"),
+            state=state,
+        )
+    elif stage_selection_touched:
+        active_recipe_id = None
     return state.with_config(
         workflow_model_id=workflow_model_id,
         workflow_thinking_level=workflow_thinking_level,
         stage_model_ids=stage_model_ids,
         stage_prompt_ids=stage_prompt_ids,
+        active_recipe_id=active_recipe_id,
     )
 
 
@@ -1101,6 +1118,7 @@ def _validate_apply_recipe_action(
     _apply_workspace_patch(
         state,
         {
+            "active_recipe_id": recipe.id,
             "stage_model_ids": dict(recipe.stage_model_ids),
             "stage_prompt_ids": dict(recipe.stage_prompt_ids),
         },
@@ -1121,6 +1139,7 @@ def _apply_apply_recipe_action(
     next_state = _apply_workspace_patch(
         state,
         {
+            "active_recipe_id": recipe.id,
             "stage_model_ids": dict(recipe.stage_model_ids),
             "stage_prompt_ids": dict(recipe.stage_prompt_ids),
         },
@@ -1915,6 +1934,7 @@ def _workspace_wire(state: AgentWorkspaceState) -> dict[str, object]:
     return {
         "workflow_model_id": state.workflow_model_id,
         "workflow_thinking_level": state.workflow_thinking_level,
+        "active_recipe_id": _resolved_active_recipe_id(state),
         "stage_model_ids": dict(state.stage_model_ids),
         "stage_prompt_ids": dict(state.stage_prompt_ids),
         "memories": list(state.memories),
@@ -2004,6 +2024,12 @@ def _conversation_summary(conversation: AgentConversation) -> dict[str, object]:
     }
 
 
+def _resolved_active_recipe_id(state: AgentWorkspaceState) -> str | None:
+    if state.active_recipe_id and state.get_recipe(state.active_recipe_id):
+        return state.active_recipe_id
+    return _active_recipe_id(state)
+
+
 def _active_recipe_id(state: AgentWorkspaceState) -> str | None:
     for recipe in state.recipes:
         if (
@@ -2012,6 +2038,29 @@ def _active_recipe_id(state: AgentWorkspaceState) -> str | None:
         ):
             return recipe.id
     return None
+
+
+def _coerce_active_recipe_id(
+    raw: object,
+    *,
+    state: AgentWorkspaceState,
+) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise BridgeError.invalid_argument(
+            "active_recipe_id must be a string or null.",
+            field="active_recipe_id",
+        )
+    value = raw.strip()
+    if not value:
+        return None
+    if state.get_recipe(value) is None:
+        raise BridgeError.not_found(
+            f"recipe {value!r} does not exist.",
+            details={"recipe_id": value},
+        )
+    return value
 
 
 def _optional_agent_string(

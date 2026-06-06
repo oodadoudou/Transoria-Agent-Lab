@@ -126,6 +126,7 @@ export interface AgentWorkspace {
   stage_prompt_ids: Record<AgentPromptSlot, string | null>;
   memories: string[];
   recipes: AgentRecipe[];
+  active_recipe_id: string | null;
   active_task: AgentActiveTask | null;
   active_conversation_id: string | null;
   conversations: AgentConversationSummary[];

@@ -13,7 +13,7 @@ import type {
 } from "@/bridge/types";
 import { Panel } from "@/components/Panel";
 import { Pill } from "@/components/Pill";
-import { useMessages } from "@/locales";
+import { useI18n, useMessages, type Locale } from "@/locales";
 import styles from "./RecipesPage.module.css";
 
 const MODEL_SLOTS: ReadonlyArray<AgentModelSlot> = [
@@ -55,6 +55,7 @@ interface ModalState {
 export function RecipesPage() {
   const messages = useMessages();
   const t = messages.agentLab;
+  const locale = useI18n((state) => state.locale);
   const [workspace, setWorkspace] = useState<AgentWorkspace | null>(null);
   const [inventory, setInventory] = useState<AgentInventory | null>(null);
   const [busy, setBusy] = useState(false);
@@ -99,13 +100,17 @@ export function RecipesPage() {
       glossary_review: [],
     };
     if (!inventory) return empty;
-    return { ...empty, ...inventory.prompts };
-  }, [inventory]);
+    return {
+      translation: filterSystemPromptLocale(inventory.prompts.translation, locale),
+      glossary: filterSystemPromptLocale(inventory.prompts.glossary, locale),
+      glossary_review: filterSystemPromptLocale(
+        inventory.prompts.glossary_review,
+        locale,
+      ),
+    };
+  }, [inventory, locale]);
 
-  const activeRecipeId = useMemo(
-    () => pickActiveRecipeId(workspace),
-    [workspace],
-  );
+  const activeRecipeId = workspace?.active_recipe_id ?? null;
 
   const openCreate = () =>
     setModal({
@@ -437,19 +442,6 @@ function RecipeModal({
   );
 }
 
-function pickActiveRecipeId(workspace: AgentWorkspace | null): string | null {
-  if (!workspace) return null;
-  for (const recipe of workspace.recipes) {
-    if (
-      sameSlot(recipe.stage_model_ids, workspace.stage_model_ids) &&
-      sameSlot(recipe.stage_prompt_ids, workspace.stage_prompt_ids)
-    ) {
-      return recipe.id;
-    }
-  }
-  return null;
-}
-
 function formatPromptChoice(
   t: ReturnType<typeof useMessages>["agentLab"],
   slot: AgentPromptSlot,
@@ -459,13 +451,13 @@ function formatPromptChoice(
   return `${t.stagePrompt[slot]} · ${prompt.name}`;
 }
 
-function sameSlot(
-  a: Record<string, string | null>,
-  b: Record<string, string | null>,
-): boolean {
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const key of keys) {
-    if ((a[key] ?? null) !== (b[key] ?? null)) return false;
-  }
-  return true;
+function filterSystemPromptLocale(
+  prompts: AgentInventoryPrompt[] | undefined,
+  locale: Locale,
+): AgentInventoryPrompt[] {
+  return (prompts ?? []).filter((prompt) => {
+    if (!prompt.is_system) return true;
+    const isEnglishDefault = prompt.id.endsWith("-en");
+    return locale === "en" ? isEnglishDefault : !isEnglishDefault;
+  });
 }

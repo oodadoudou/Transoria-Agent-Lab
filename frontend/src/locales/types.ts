@@ -380,10 +380,17 @@ export interface Messages {
     deleteMemory: string;
     conversationsTitle: string;
     conversationsSub: string;
+    collapseHistory: string;
+    expandHistory: string;
     newConversation: string;
     untitledConversation: string;
     renameConversation: string;
     deleteConversation: string;
+    thinkingTitle: string;
+    thinkingLead: string;
+    thinkingSteps: string[];
+    expandMessage: string;
+    collapseMessage: string;
     activeRecipeTitle: string;
     activeRecipeSub: string;
     activeRecipeNone: string;

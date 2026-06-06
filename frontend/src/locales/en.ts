@@ -641,10 +641,17 @@ export const en: Messages = {
     conversationsTitle: "Conversations",
     conversationsSub:
       "Each conversation keeps its own messages and drafts; config and memory are shared across the workspace.",
+    collapseHistory: "Collapse",
+    expandHistory: "History",
     newConversation: "New conversation",
     untitledConversation: "Untitled conversation",
     renameConversation: "Rename",
     deleteConversation: "Delete",
+    thinkingTitle: "Agent is working",
+    thinkingLead: "The model is thinking and preparing a response.",
+    thinkingSteps: ["Reading context", "Checking current config", "Preparing a reply or draft"],
+    expandMessage: "Show more",
+    collapseMessage: "Show less",
     activeRecipeTitle: "Active recipe",
     activeRecipeSub:
       "Tasks the agent starts will use the stage model + prompt combination shown below.",

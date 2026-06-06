@@ -366,6 +366,7 @@ class AgentActiveTask:
 class AgentWorkspaceState:
     workflow_model_id: str | None = None
     workflow_thinking_level: WorkflowThinkingLevel = "off"
+    active_recipe_id: str | None = None
     stage_model_ids: Mapping[str, str | None] = field(
         default_factory=lambda: {slot: None for slot in MODEL_SLOTS}
     )
@@ -395,6 +396,7 @@ class AgentWorkspaceState:
             workflow_thinking_level=_thinking_level_from(
                 data.get("workflow_thinking_level")
             ),
+            active_recipe_id=_optional_str(data.get("active_recipe_id")),
             stage_model_ids=_slot_mapping(data.get("stage_model_ids"), MODEL_SLOTS),
             stage_prompt_ids=_slot_mapping(data.get("stage_prompt_ids"), PROMPT_SLOTS),
             memories=_memories_from(data.get("memories")),
@@ -409,6 +411,7 @@ class AgentWorkspaceState:
         return {
             "workflow_model_id": self.workflow_model_id,
             "workflow_thinking_level": self.workflow_thinking_level,
+            "active_recipe_id": self.active_recipe_id,
             "stage_model_ids": dict(self.stage_model_ids),
             "stage_prompt_ids": dict(self.stage_prompt_ids),
             "memories": list(self.memories),
@@ -493,6 +496,7 @@ class AgentWorkspaceState:
         *,
         workflow_model_id: str | None | object = ...,
         workflow_thinking_level: WorkflowThinkingLevel | object = ...,
+        active_recipe_id: str | None | object = ...,
         stage_model_ids: Mapping[str, str | None] | None = None,
         stage_prompt_ids: Mapping[str, str | None] | None = None,
     ) -> "AgentWorkspaceState":
@@ -507,6 +511,11 @@ class AgentWorkspaceState:
                 self.workflow_thinking_level
                 if workflow_thinking_level is ...
                 else workflow_thinking_level  # type: ignore[assignment]
+            ),
+            active_recipe_id=(
+                self.active_recipe_id
+                if active_recipe_id is ...
+                else active_recipe_id  # type: ignore[assignment]
             ),
             stage_model_ids=stage_model_ids or self.stage_model_ids,
             stage_prompt_ids=stage_prompt_ids or self.stage_prompt_ids,
@@ -538,7 +547,15 @@ class AgentWorkspaceState:
         recipes = tuple(
             recipe for recipe in self.recipes if recipe.id != recipe_id
         )
-        return replace(self, recipes=recipes, updated_at=now_iso())
+        active_recipe_id = (
+            None if self.active_recipe_id == recipe_id else self.active_recipe_id
+        )
+        return replace(
+            self,
+            recipes=recipes,
+            active_recipe_id=active_recipe_id,
+            updated_at=now_iso(),
+        )
 
     def with_active_task(
         self, active_task: AgentActiveTask

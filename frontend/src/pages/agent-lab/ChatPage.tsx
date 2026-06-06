@@ -2,9 +2,6 @@ import { useEffect, useState } from "react";
 import { agentBridge } from "@/bridge/client";
 import type {
   AgentInventory,
-  AgentInventoryPrompt,
-  AgentModelSlot,
-  AgentPromptSlot,
   AgentRecipe,
   AgentWorkspace,
   AgentWorkspaceResponse,
@@ -15,24 +12,13 @@ import { useMessages } from "@/locales";
 import { useTaskStore } from "@/store/useTaskStore";
 import styles from "./ChatPage.module.css";
 
-const MODEL_SLOTS: ReadonlyArray<AgentModelSlot> = [
-  "translation",
-  "term_extract",
-  "term_review",
-];
-
-const PROMPT_SLOTS: ReadonlyArray<AgentPromptSlot> = [
-  "translation",
-  "term_extract",
-  "term_review",
-];
-
 const THINKING_LEVELS: ReadonlyArray<ThinkingLevel> = [
   "off",
   "low",
   "medium",
   "high",
 ];
+const COLLAPSE_MESSAGE_CHARS = 900;
 
 export function ChatPage() {
   const messages = useMessages();
@@ -50,6 +36,13 @@ export function ChatPage() {
     null,
   );
   const [editingMemoryText, setEditingMemoryText] = useState("");
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [recipeOpen, setRecipeOpen] = useState(false);
+  const [reasoningOpen, setReasoningOpen] = useState(false);
+  const [expandedMessages, setExpandedMessages] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
   const applyResponse = (response: AgentWorkspaceResponse) => {
     setWorkspace(response.workspace);
@@ -164,201 +157,261 @@ export function ChatPage() {
 
   const switchRecipe = (id: string) => {
     if (!id) return;
+    setRecipeOpen(false);
     void run(() => agentBridge.applyRecipe(id));
   };
 
-  const updateWorkflowModel = (value: string) =>
+  const updateWorkflowModel = (value: string) => {
+    setModelOpen(false);
     void run(() =>
       agentBridge.updateWorkspace({ workflow_model_id: value || null }),
     );
+  };
 
   const updateWorkflowThinking = (value: ThinkingLevel) =>
-    void run(() =>
-      agentBridge.updateWorkspace({ workflow_thinking_level: value }),
-    );
+    void run(() => {
+      setReasoningOpen(false);
+      return agentBridge.updateWorkspace({ workflow_thinking_level: value });
+    });
+
+  const toggleMessageExpanded = (id: string) => {
+    setExpandedMessages((current) => {
+      const next = new Set(current);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
 
   const activeRecipe = pickActiveRecipe(workspace);
   const profileLookup = new Map(
     (inventory?.profiles ?? []).map((profile) => [profile.id, profile]),
   );
-  const promptLookup = new Map(
-    Object.values(inventory?.prompts ?? {})
-      .flat()
-      .map((prompt) => [prompt.id, prompt]),
-  );
   const workflowProfile = workspace?.workflow_model_id
     ? profileLookup.get(workspace.workflow_model_id)
     : null;
   const workflowThinkingEnabled = Boolean(workflowProfile?.supports_thinking);
+  const thinkingLevel = workspace?.workflow_thinking_level ?? "off";
+  const workflowModelLabel = workflowProfile
+    ? shortLabel(workflowProfile.display_name)
+    : t.noModel;
+  const activeRecipeLabel = activeRecipe
+    ? shortLabel(activeRecipe.name)
+    : t.activeRecipeNone;
 
   return (
     <div className={styles.page}>
       {error ? <div className={styles.error}>{error}</div> : null}
 
-      <div className={styles.chatShell}>
-        <aside className={styles.historyPane}>
-          <div className={styles.paneHeader}>
-            <div>
-              <h2>{t.conversationsTitle}</h2>
-              <p>{t.conversationsSub}</p>
+      <div
+        className={`${styles.chatShell} ${
+          historyCollapsed ? styles.historyCollapsedShell : ""
+        }`.trim()}
+      >
+        <aside
+          className={`${styles.historyPane} ${
+            historyCollapsed ? styles.historyPaneCollapsed : ""
+          }`.trim()}
+        >
+          {historyCollapsed ? (
+            <div className={styles.collapsedHistory}>
+              <button
+                type="button"
+                className={styles.historyToggle}
+                onClick={() => setHistoryCollapsed(false)}
+              >
+                {t.expandHistory}
+              </button>
+              <span className={styles.collapsedCount}>
+                {workspace?.conversations.length ?? 0}
+              </span>
             </div>
-            <Pill disabled={busy} onClick={() => void createConversation()}>
-              {t.newConversation}
-            </Pill>
-          </div>
-
-          <div className={styles.convList}>
-            {(workspace?.conversations ?? []).map((conversation) => {
-              const isActive =
-                conversation.id === workspace?.active_conversation_id;
-              const isEditing = conversation.id === editingConvId;
-              return (
-                <div
-                  key={conversation.id}
-                  className={`${styles.convItem} ${
-                    isActive ? styles.convActive : ""
-                  }`.trim()}
-                >
-                  {isEditing ? (
-                    <input
-                      className={styles.inlineInput}
-                      value={editingConvTitle}
-                      autoFocus
-                      disabled={busy}
-                      onChange={(event) =>
-                        setEditingConvTitle(event.target.value)
-                      }
-                      onBlur={() => void commitRename()}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          void commitRename();
-                        } else if (event.key === "Escape") {
-                          setEditingConvId(null);
-                        }
-                      }}
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      className={styles.convTitle}
-                      disabled={busy}
-                      onClick={() => switchConversation(conversation.id)}
-                    >
-                      <span className={styles.convName}>
-                        {conversation.title || t.untitledConversation}
-                      </span>
-                      <span className={styles.convMeta}>
-                        {conversation.message_count}
-                      </span>
-                    </button>
-                  )}
-                  {isEditing ? null : (
-                    <div className={styles.convActions}>
-                      <button
-                        type="button"
-                        className={styles.linkButton}
-                        disabled={busy}
-                        onClick={() =>
-                          startRename(conversation.id, conversation.title)
-                        }
-                      >
-                        {t.renameConversation}
-                      </button>
-                      <button
-                        type="button"
-                        className={styles.linkButton}
-                        disabled={busy}
-                        onClick={() => deleteConversation(conversation.id)}
-                      >
-                        {t.deleteConversation}
-                      </button>
-                    </div>
-                  )}
+          ) : (
+            <>
+              <div className={styles.paneHeader}>
+                <div>
+                  <h2>{t.conversationsTitle}</h2>
+                  <p>{t.conversationsSub}</p>
                 </div>
-              );
-            })}
-          </div>
+                <div className={styles.headerActions}>
+                  <button
+                    type="button"
+                    className={styles.historyToggle}
+                    onClick={() => setHistoryCollapsed(true)}
+                  >
+                    {t.collapseHistory}
+                  </button>
+                  <Pill
+                    className={styles.newConversationButton}
+                    disabled={busy}
+                    onClick={() => void createConversation()}
+                    aria-label={t.newConversation}
+                  >
+                    +
+                  </Pill>
+                </div>
+              </div>
 
-          <div className={styles.memoryBox}>
-            <div className={styles.paneSectionTitle}>
-              <h2>{t.memoryTitle}</h2>
-              <p>{t.memorySub}</p>
-            </div>
-            {workspace?.memories.length ? (
-              <ul className={styles.memoryList}>
-                {workspace.memories.map((memory, index) => (
-                  <li key={`${index}-${memory}`} className={styles.memoryItem}>
-                    {editingMemoryIndex === index ? (
-                      <input
-                        className={styles.inlineInput}
-                        value={editingMemoryText}
-                        autoFocus
-                        disabled={busy}
-                        onChange={(event) =>
-                          setEditingMemoryText(event.target.value)
-                        }
-                        onBlur={() => void commitMemoryEdit()}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            void commitMemoryEdit();
-                          } else if (event.key === "Escape") {
-                            setEditingMemoryIndex(null);
+              <div className={styles.convList}>
+                {(workspace?.conversations ?? []).map((conversation) => {
+                  const isActive =
+                    conversation.id === workspace?.active_conversation_id;
+                  const isEditing = conversation.id === editingConvId;
+                  return (
+                    <div
+                      key={conversation.id}
+                      className={`${styles.convItem} ${
+                        isActive ? styles.convActive : ""
+                      }`.trim()}
+                    >
+                      {isEditing ? (
+                        <input
+                          className={styles.inlineInput}
+                          value={editingConvTitle}
+                          autoFocus
+                          disabled={busy}
+                          onChange={(event) =>
+                            setEditingConvTitle(event.target.value)
                           }
-                        }}
-                      />
-                    ) : (
-                      <>
-                        <span className={styles.memoryText}>{memory}</span>
-                        <div className={styles.memoryActions}>
+                          onBlur={() => void commitRename()}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void commitRename();
+                            } else if (event.key === "Escape") {
+                              setEditingConvId(null);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          className={styles.convTitle}
+                          disabled={busy}
+                          onClick={() => switchConversation(conversation.id)}
+                        >
+                          <span className={styles.convName}>
+                            {conversation.title || t.untitledConversation}
+                          </span>
+                          <span className={styles.convMeta}>
+                            {conversation.message_count}
+                          </span>
+                        </button>
+                      )}
+                      {isEditing ? null : (
+                        <div className={styles.convActions}>
                           <button
                             type="button"
                             className={styles.linkButton}
                             disabled={busy}
-                            onClick={() => startEditMemory(index, memory)}
+                            onClick={() =>
+                              startRename(conversation.id, conversation.title)
+                            }
                           >
-                            {t.editMemory}
+                            {t.renameConversation}
                           </button>
                           <button
                             type="button"
                             className={styles.linkButton}
                             disabled={busy}
-                            onClick={() => deleteMemory(memory)}
+                            onClick={() => deleteConversation(conversation.id)}
                           >
-                            {t.deleteMemory}
+                            {t.deleteConversation}
                           </button>
                         </div>
-                      </>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className={styles.empty}>{t.memoryEmpty}</div>
-            )}
-            <div className={styles.memoryAdd}>
-              <input
-                className={styles.inlineInput}
-                value={newMemory}
-                placeholder={t.memoryAddPlaceholder}
-                disabled={busy}
-                onChange={(event) => setNewMemory(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void addMemory();
-                  }
-                }}
-              />
-              <Pill
-                disabled={busy || !newMemory.trim()}
-                onClick={() => void addMemory()}
-              >
-                {t.memoryAdd}
-              </Pill>
-            </div>
-          </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className={styles.memoryBox}>
+                <div className={styles.paneSectionTitle}>
+                  <h2>{t.memoryTitle}</h2>
+                  <p>{t.memorySub}</p>
+                </div>
+                {workspace?.memories.length ? (
+                  <ul className={styles.memoryList}>
+                    {workspace.memories.map((memory, index) => (
+                      <li
+                        key={`${index}-${memory}`}
+                        className={styles.memoryItem}
+                      >
+                        {editingMemoryIndex === index ? (
+                          <input
+                            className={styles.inlineInput}
+                            value={editingMemoryText}
+                            autoFocus
+                            disabled={busy}
+                            onChange={(event) =>
+                              setEditingMemoryText(event.target.value)
+                            }
+                            onBlur={() => void commitMemoryEdit()}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void commitMemoryEdit();
+                              } else if (event.key === "Escape") {
+                                setEditingMemoryIndex(null);
+                              }
+                            }}
+                          />
+                        ) : (
+                          <>
+                            <span className={styles.memoryText}>{memory}</span>
+                            <div className={styles.memoryActions}>
+                              <button
+                                type="button"
+                                className={styles.linkButton}
+                                disabled={busy}
+                                onClick={() => startEditMemory(index, memory)}
+                              >
+                                {t.editMemory}
+                              </button>
+                              <button
+                                type="button"
+                                className={styles.linkButton}
+                                disabled={busy}
+                                onClick={() => deleteMemory(memory)}
+                              >
+                                {t.deleteMemory}
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className={styles.empty}>{t.memoryEmpty}</div>
+                )}
+                <div className={styles.memoryAdd}>
+                  <input
+                    className={styles.inlineInput}
+                    value={newMemory}
+                    placeholder={t.memoryAddPlaceholder}
+                    disabled={busy}
+                    onChange={(event) => setNewMemory(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void addMemory();
+                      }
+                    }}
+                  />
+                  <Pill
+                    disabled={busy || !newMemory.trim()}
+                    onClick={() => void addMemory()}
+                  >
+                    {t.memoryAdd}
+                  </Pill>
+                </div>
+              </div>
+            </>
+          )}
         </aside>
 
         <main className={styles.chatMain}>
@@ -367,121 +420,48 @@ export function ChatPage() {
               <h1>{t.title}</h1>
               <p>{t.sub}</p>
             </div>
-            <div className={styles.toolbarControls}>
-              <label className={styles.selectField}>
-                <span>{t.workflowModel}</span>
-                <select
-                  value={workspace?.workflow_model_id ?? ""}
-                  disabled={busy || !workspace || !inventory}
-                  onChange={(event) => updateWorkflowModel(event.target.value)}
-                >
-                  <option value="">{t.noModel}</option>
-                  {(inventory?.profiles ?? []).map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {profile.api_key_configured
-                        ? `${profile.display_name} · ${profile.model_id}`
-                        : `${profile.display_name} · ${profile.model_id} (${t.modelNotConfigured})`}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className={styles.selectField}>
-                <span>{t.workflowThinkingLevel}</span>
-                <select
-                  value={workspace?.workflow_thinking_level ?? "off"}
-                  disabled={busy || !workflowThinkingEnabled}
-                  onChange={(event) =>
-                    updateWorkflowThinking(event.target.value as ThinkingLevel)
-                  }
-                >
-                  {THINKING_LEVELS.map((level) => (
-                    <option key={level} value={level}>
-                      {messages.model.thinking[level]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className={styles.selectField}>
-                <span>{t.activeRecipeTitle}</span>
-                <select
-                  value={activeRecipe?.id ?? ""}
-                  disabled={busy || !workspace}
-                  onChange={(event) => switchRecipe(event.target.value)}
-                >
-                  <option value="">{t.activeRecipeNone}</option>
-                  {(workspace?.recipes ?? []).map((recipe) => (
-                    <option key={recipe.id} value={recipe.id}>
-                      {recipe.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="button"
-                className={styles.manageButton}
-                onClick={() =>
-                  navigate({ module: "agent-lab", page: "recipes" })
-                }
-              >
-                {t.activeRecipeManageHere}
-              </button>
-            </div>
-          </div>
-
-          <div className={styles.statusStrip}>
-            <span>
-              {workflowThinkingEnabled
-                ? t.workflowThinkingUsesModel
-                : t.workflowThinkingUnsupported}
-            </span>
-            <span>{t.confirmationBoundary}</span>
-          </div>
-
-          <div className={styles.stageSummary}>
-            {MODEL_SLOTS.map((slot) => {
-              const modelId = workspace?.stage_model_ids[slot] ?? null;
-              const profile = modelId ? profileLookup.get(modelId) : null;
-              return (
-                <div key={`m-${slot}`} className={styles.stageRow}>
-                  <span className={styles.stageLabel}>
-                    {t.stageModel[slot]}
-                  </span>
-                  <span className={styles.stageValue}>
-                    {profile?.display_name ?? t.stageEmptyModel}
-                  </span>
-                </div>
-              );
-            })}
-            {PROMPT_SLOTS.map((slot) => {
-              const promptId = workspace?.stage_prompt_ids[slot] ?? null;
-              const prompt = promptId ? promptLookup.get(promptId) : null;
-              return (
-                <div key={`p-${slot}`} className={styles.stageRow}>
-                  <span className={styles.stageLabel}>
-                    {t.stagePrompt[slot]}
-                  </span>
-                  <span className={styles.stageValue}>
-                    {formatPromptChoice(t, slot, prompt)}
-                  </span>
-                </div>
-              );
-            })}
+            <button
+              type="button"
+              className={styles.manageButton}
+              onClick={() => navigate({ module: "agent-lab", page: "recipes" })}
+            >
+              {t.activeRecipeManageHere}
+            </button>
           </div>
 
           <div className={styles.messages}>
-            {(workspace?.messages ?? []).map((message) => (
-              <div
-                key={message.id}
-                className={`${styles.message} ${
-                  message.role === "user"
-                    ? styles.userMessage
-                    : styles.agentMessage
-                }`}
-              >
-                <div className={styles.messageRole}>{message.role}</div>
-                <div className={styles.messageBody}>{message.content}</div>
-              </div>
-            ))}
+            {(workspace?.messages ?? []).map((message) => {
+              const isLong = message.content.length > COLLAPSE_MESSAGE_CHARS;
+              const isExpanded = expandedMessages.has(message.id);
+              const body =
+                isLong && !isExpanded
+                  ? `${message.content
+                      .slice(0, COLLAPSE_MESSAGE_CHARS)
+                      .trimEnd()}…`
+                  : message.content;
+              return (
+                <div
+                  key={message.id}
+                  className={`${styles.message} ${
+                    message.role === "user"
+                      ? styles.userMessage
+                      : styles.agentMessage
+                  }`}
+                >
+                  <div className={styles.messageRole}>{message.role}</div>
+                  <div className={styles.messageBody}>{body}</div>
+                  {isLong ? (
+                    <button
+                      type="button"
+                      className={styles.expandMessageButton}
+                      onClick={() => toggleMessageExpanded(message.id)}
+                    >
+                      {isExpanded ? t.collapseMessage : t.expandMessage}
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })}
             {(workspace?.messages ?? []).length <= 1 ? (
               <div className={styles.quickActions}>
                 {t.quickActions.map((action) => (
@@ -494,6 +474,23 @@ export function ChatPage() {
                     {action}
                   </button>
                 ))}
+              </div>
+            ) : null}
+            {busy ? (
+              <div
+                className={`${styles.message} ${styles.agentMessage} ${styles.thinkingMessage}`}
+                aria-live="polite"
+              >
+                <div className={styles.messageRole}>{t.thinkingTitle}</div>
+                <div className={styles.thinkingLead}>
+                  <span className={styles.spinner} aria-hidden="true" />
+                  <span>{t.thinkingLead}</span>
+                </div>
+                <div className={styles.thinkingSteps}>
+                  {t.thinkingSteps.map((step) => (
+                    <span key={step}>{step}</span>
+                  ))}
+                </div>
               </div>
             ) : null}
           </div>
@@ -524,18 +521,141 @@ export function ChatPage() {
               disabled={busy}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                  event.preventDefault();
-                  void sendMessage();
-                }
+                if (event.key !== "Enter") return;
+                if (event.shiftKey || event.nativeEvent.isComposing) return;
+                event.preventDefault();
+                void sendMessage();
               }}
             />
-            <Pill
-              disabled={busy || !input.trim()}
-              onClick={() => void sendMessage()}
-            >
-              {busy ? t.sending : t.send}
-            </Pill>
+            <div className={styles.composerBar}>
+              <div className={styles.composerControls}>
+                <div className={styles.compactMenu}>
+                  <button
+                    type="button"
+                    className={styles.compactButton}
+                    disabled={busy || !workspace || !inventory}
+                    aria-label={t.workflowModel}
+                    aria-expanded={modelOpen}
+                    aria-haspopup="menu"
+                    onClick={() => setModelOpen((open) => !open)}
+                  >
+                    <span>{workflowModelLabel}</span>
+                    <span aria-hidden="true">⌄</span>
+                  </button>
+                  {modelOpen ? (
+                    <div className={styles.compactPopup} role="menu">
+                      <button
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={!workspace?.workflow_model_id}
+                        className={styles.compactOption}
+                        onClick={() => updateWorkflowModel("")}
+                      >
+                        <span>{t.noModel}</span>
+                        {!workspace?.workflow_model_id ? (
+                          <span aria-hidden="true">✓</span>
+                        ) : null}
+                      </button>
+                      {(inventory?.profiles ?? []).map((profile) => (
+                        <button
+                          key={profile.id}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={profile.id === workspace?.workflow_model_id}
+                          className={styles.compactOption}
+                          onClick={() => updateWorkflowModel(profile.id)}
+                        >
+                          <span>{shortLabel(profile.display_name)}</span>
+                          {profile.id === workspace?.workflow_model_id ? (
+                            <span aria-hidden="true">✓</span>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <div className={styles.reasoningMenu}>
+                  <button
+                    type="button"
+                    className={styles.reasoningButton}
+                    disabled={busy || !workflowThinkingEnabled}
+                    aria-expanded={reasoningOpen}
+                    aria-haspopup="menu"
+                    onClick={() => setReasoningOpen((open) => !open)}
+                  >
+                    {messages.model.thinking[thinkingLevel]}
+                    <span aria-hidden="true">⌄</span>
+                  </button>
+                  {reasoningOpen && workflowThinkingEnabled ? (
+                    <div className={styles.reasoningPopup} role="menu">
+                      <div className={styles.reasoningHeading}>
+                        {t.workflowThinkingLevel}
+                      </div>
+                      {THINKING_LEVELS.map((level) => (
+                        <button
+                          key={level}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={level === thinkingLevel}
+                          className={styles.reasoningOption}
+                          onClick={() => updateWorkflowThinking(level)}
+                        >
+                          <span>{messages.model.thinking[level]}</span>
+                          {level === thinkingLevel ? (
+                            <span aria-hidden="true">✓</span>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <div className={styles.compactMenu}>
+                  <button
+                    type="button"
+                    className={styles.compactButton}
+                    disabled={busy || !workspace}
+                    aria-label={t.activeRecipeTitle}
+                    aria-expanded={recipeOpen}
+                    aria-haspopup="menu"
+                    onClick={() => setRecipeOpen((open) => !open)}
+                  >
+                    <span>{activeRecipeLabel}</span>
+                    <span aria-hidden="true">⌄</span>
+                  </button>
+                  {recipeOpen ? (
+                    <div className={styles.compactPopup} role="menu">
+                      {(workspace?.recipes ?? []).length ? (
+                        (workspace?.recipes ?? []).map((recipe) => (
+                          <button
+                            key={recipe.id}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={recipe.id === activeRecipe?.id}
+                            className={styles.compactOption}
+                            onClick={() => switchRecipe(recipe.id)}
+                          >
+                            <span>{shortLabel(recipe.name)}</span>
+                            {recipe.id === activeRecipe?.id ? (
+                              <span aria-hidden="true">✓</span>
+                            ) : null}
+                          </button>
+                        ))
+                      ) : (
+                        <div className={styles.compactEmpty}>
+                          {t.activeRecipeNone}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+                <Pill
+                  disabled={busy || !input.trim()}
+                  onClick={() => void sendMessage()}
+                >
+                  {busy ? t.sending : t.send}
+                </Pill>
+              </div>
+            </div>
           </div>
         </main>
       </div>
@@ -543,35 +663,16 @@ export function ChatPage() {
   );
 }
 
+function shortLabel(label: string): string {
+  const trimmed = label.trim();
+  if (trimmed.length <= 18) return trimmed;
+  return `${trimmed.slice(0, 17)}…`;
+}
+
 function pickActiveRecipe(workspace: AgentWorkspace | null): AgentRecipe | null {
-  if (!workspace) return null;
-  for (const recipe of workspace.recipes) {
-    if (
-      sameSlot(recipe.stage_model_ids, workspace.stage_model_ids) &&
-      sameSlot(recipe.stage_prompt_ids, workspace.stage_prompt_ids)
-    ) {
-      return recipe;
-    }
-  }
-  return null;
-}
-
-function formatPromptChoice(
-  t: ReturnType<typeof useMessages>["agentLab"],
-  slot: AgentPromptSlot,
-  prompt: AgentInventoryPrompt | null | undefined,
-): string {
-  if (!prompt) return t.stageEmptyPrompt;
-  return `${t.stagePrompt[slot]} · ${prompt.name}`;
-}
-
-function sameSlot(
-  a: Record<string, string | null>,
-  b: Record<string, string | null>,
-): boolean {
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const key of keys) {
-    if ((a[key] ?? null) !== (b[key] ?? null)) return false;
-  }
-  return true;
+  if (!workspace?.active_recipe_id) return null;
+  return (
+    workspace.recipes.find((recipe) => recipe.id === workspace.active_recipe_id) ??
+    null
+  );
 }
