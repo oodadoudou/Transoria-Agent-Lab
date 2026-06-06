@@ -111,7 +111,7 @@ class NullUpdateChecker:
 
 @dataclass(frozen=True)
 class GithubReleaseChecker:
-    repository: str = "doudouda/Transoria"
+    repository: str = "oodadoudou/Transoria-Agent-Lab"
     downloads_dir: Path | None = None
     client_factory: Callable[..., object] | None = None
     # Read on every HTTP call so the user can change ``app.proxy_url``

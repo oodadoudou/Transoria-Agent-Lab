@@ -308,7 +308,10 @@ export const agentBridge = {
     patch: Partial<
       Pick<
         AgentWorkspace,
-        "workflow_model_id" | "stage_model_ids" | "stage_prompt_ids"
+        | "workflow_model_id"
+        | "workflow_thinking_level"
+        | "stage_model_ids"
+        | "stage_prompt_ids"
       >
     >,
   ): Promise<AgentWorkspaceResponse> {

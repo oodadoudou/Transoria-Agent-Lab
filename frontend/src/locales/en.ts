@@ -573,7 +573,7 @@ export const en: Messages = {
       epubConvert: "EPUB to TXT",
       epubMetadata: "EPUB Metadata",
     },
-    agentLab: { chat: "Chat", recipes: "Recipes" },
+    agentLab: { chat: "Agent Chat", recipes: "Recipes" },
     appSettings: { general: "General" },
   },
   agentLab: {
@@ -584,6 +584,11 @@ export const en: Messages = {
     configSub:
       "The workflow model handles chat and drafts. Translation-flow models and prompts are presets for later task orchestration.",
     workflowModel: "Workflow model",
+    workflowThinkingLevel: "Thinking level",
+    workflowThinkingUnsupported:
+      "The current workflow model has thinking mode off or unsupported.",
+    workflowThinkingUsesModel:
+      "Inherited from the model profile; adjustable for this workspace.",
     translationModel: "Translation model",
     termExtractModel: "Term extraction model",
     termReviewModel: "Term review model",
@@ -596,6 +601,12 @@ export const en: Messages = {
     chatTitle: "Chat",
     chatSub:
       "Ask the agent to design model and prompt combinations. It creates reviewable drafts first.",
+    quickActions: [
+      "Design a translation-flow recipe",
+      "Check what the active recipe is missing",
+      "Create a term extraction prompt",
+      "Compare the current model configs",
+    ],
     inputPlaceholder:
       "Example: create a more literary translation prompt and use a cheaper model for term extraction.",
     send: "Send",

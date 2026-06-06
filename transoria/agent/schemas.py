@@ -14,6 +14,7 @@ from uuid import uuid4
 AgentRole = Literal["user", "assistant", "system"]
 DraftStatus = Literal["pending", "applied", "discarded"]
 AgentTaskKind = Literal["translation", "glossary", "glossary_review"]
+WorkflowThinkingLevel = Literal["off", "low", "medium", "high"]
 
 MODEL_SLOTS: tuple[str, ...] = ("translation", "term_extract", "term_review")
 PROMPT_SLOTS: tuple[str, ...] = ("translation", "term_extract", "term_review")
@@ -364,6 +365,7 @@ class AgentActiveTask:
 @dataclass(frozen=True)
 class AgentWorkspaceState:
     workflow_model_id: str | None = None
+    workflow_thinking_level: WorkflowThinkingLevel = "off"
     stage_model_ids: Mapping[str, str | None] = field(
         default_factory=lambda: {slot: None for slot in MODEL_SLOTS}
     )
@@ -390,6 +392,9 @@ class AgentWorkspaceState:
         conversations, active_id = _conversations_from(data)
         return cls(
             workflow_model_id=_optional_str(data.get("workflow_model_id")),
+            workflow_thinking_level=_thinking_level_from(
+                data.get("workflow_thinking_level")
+            ),
             stage_model_ids=_slot_mapping(data.get("stage_model_ids"), MODEL_SLOTS),
             stage_prompt_ids=_slot_mapping(data.get("stage_prompt_ids"), PROMPT_SLOTS),
             memories=_memories_from(data.get("memories")),
@@ -403,6 +408,7 @@ class AgentWorkspaceState:
     def to_dict(self) -> dict[str, object]:
         return {
             "workflow_model_id": self.workflow_model_id,
+            "workflow_thinking_level": self.workflow_thinking_level,
             "stage_model_ids": dict(self.stage_model_ids),
             "stage_prompt_ids": dict(self.stage_prompt_ids),
             "memories": list(self.memories),
@@ -486,6 +492,7 @@ class AgentWorkspaceState:
         self,
         *,
         workflow_model_id: str | None | object = ...,
+        workflow_thinking_level: WorkflowThinkingLevel | object = ...,
         stage_model_ids: Mapping[str, str | None] | None = None,
         stage_prompt_ids: Mapping[str, str | None] | None = None,
     ) -> "AgentWorkspaceState":
@@ -495,6 +502,11 @@ class AgentWorkspaceState:
                 self.workflow_model_id
                 if workflow_model_id is ...
                 else workflow_model_id  # type: ignore[assignment]
+            ),
+            workflow_thinking_level=(
+                self.workflow_thinking_level
+                if workflow_thinking_level is ...
+                else workflow_thinking_level  # type: ignore[assignment]
             ),
             stage_model_ids=stage_model_ids or self.stage_model_ids,
             stage_prompt_ids=stage_prompt_ids or self.stage_prompt_ids,
@@ -561,6 +573,13 @@ def _memories_from(value: object) -> tuple[str, ...]:
     return tuple(
         item.strip() for item in value if isinstance(item, str) and item.strip()
     )
+
+
+def _thinking_level_from(value: object) -> WorkflowThinkingLevel:
+    raw = str(value or "off")
+    if raw in ("off", "low", "medium", "high"):
+        return raw  # type: ignore[return-value]
+    return "off"
 
 
 def _recipes_from(value: object) -> tuple[AgentRecipe, ...]:

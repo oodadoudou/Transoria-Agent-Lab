@@ -558,7 +558,7 @@ export const zh: Messages = {
       epubConvert: "EPUB 转 TXT",
       epubMetadata: "EPUB 元数据",
     },
-    agentLab: { chat: "聊天", recipes: "预设配置" },
+    agentLab: { chat: "Agent 聊天", recipes: "预设配置" },
     appSettings: { general: "常规" },
   },
   agentLab: {
@@ -569,6 +569,9 @@ export const zh: Messages = {
     configSub:
       "工作模型负责聊天和生成草案。翻译流程模型与 Prompt 只是后续任务的预设选择。",
     workflowModel: "工作模型",
+    workflowThinkingLevel: "思考强度",
+    workflowThinkingUnsupported: "当前工作模型未开启或不支持思考模式。",
+    workflowThinkingUsesModel: "沿用模型配置，可在工作区临时调整。",
     translationModel: "翻译模型",
     termExtractModel: "术语提取模型",
     termReviewModel: "术语审核模型",
@@ -581,6 +584,12 @@ export const zh: Messages = {
     chatTitle: "聊天",
     chatSub:
       "你可以让 Agent 帮你设计模型和 Prompt 组合。它会先生成可审查草案。",
+    quickActions: [
+      "帮我整理一套翻译流程预设",
+      "检查当前预设缺什么",
+      "创建一个术语提取 Prompt",
+      "帮我比较当前模型配置",
+    ],
     inputPlaceholder:
       "例如：帮我新建一套偏文学化的翻译 Prompt，并把术语提取用更便宜的模型。",
     send: "发送",

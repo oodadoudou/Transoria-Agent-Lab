@@ -24,6 +24,7 @@ const RAIL_EXPANDED_STORAGE_KEY = "transoria.rail.expanded";
 
 function buildTree(messages: ReturnType<typeof useMessages>): {
   modules: ReadonlyArray<ModuleSpec>;
+  lab: ReadonlyArray<ModuleSpec>;
   workspace: ReadonlyArray<ModuleSpec>;
 } {
   const t = messages.pages.translation;
@@ -83,7 +84,7 @@ function buildTree(messages: ReturnType<typeof useMessages>): {
         ],
       },
     ],
-    workspace: [
+    lab: [
       {
         id: "agent-lab",
         label: messages.rail.agentLab,
@@ -92,6 +93,8 @@ function buildTree(messages: ReturnType<typeof useMessages>): {
           { page: "recipes", label: messages.pages.agentLab.recipes },
         ],
       },
+    ],
+    workspace: [
       {
         id: "app-settings",
         label: messages.rail.appSettings,
@@ -167,6 +170,19 @@ export function Rail() {
     <nav className={styles.rail} aria-label={messages.rail.modulesAria}>
       <div className={styles.label}>{messages.rail.modules}</div>
       {tree.modules.map((mod) => (
+        <ModuleNode
+          key={mod.id}
+          spec={mod}
+          route={route}
+          open={isOpen(mod.id)}
+          onToggle={() => toggle(mod.id)}
+          onNavigate={navigate}
+        />
+      ))}
+
+      <div className={styles.sep} />
+      <div className={styles.label}>{messages.rail.agentLab}</div>
+      {tree.lab.map((mod) => (
         <ModuleNode
           key={mod.id}
           spec={mod}

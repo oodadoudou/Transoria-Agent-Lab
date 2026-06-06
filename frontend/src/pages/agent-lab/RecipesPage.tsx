@@ -199,7 +199,7 @@ export function RecipesPage() {
               <div key={`p-${slot}`} className={styles.stageRow}>
                 <span className={styles.stageLabel}>{t.stagePrompt[slot]}</span>
                 <span className={styles.stageValue}>
-                  {prompt?.name ?? t.stageEmptyPrompt}
+                  {formatPromptChoice(t, slot, prompt)}
                 </span>
               </div>
             );
@@ -264,7 +264,7 @@ export function RecipesPage() {
                             <span className={styles.recipeSlotLabel}>
                               {t.stagePrompt[slot]}
                             </span>
-                            <span>{prompt?.name ?? t.stageEmptyPrompt}</span>
+                            <span>{formatPromptChoice(t, slot, prompt)}</span>
                           </span>
                         );
                       })}
@@ -417,7 +417,7 @@ function RecipeModal({
                 <option value="">{t.stageEmptyPrompt}</option>
                 {promptOptions[kind].map((prompt) => (
                   <option key={prompt.id} value={prompt.id}>
-                    {prompt.name}
+                    {formatPromptChoice(t, slot, prompt)}
                   </option>
                 ))}
               </select>
@@ -448,6 +448,15 @@ function pickActiveRecipeId(workspace: AgentWorkspace | null): string | null {
     }
   }
   return null;
+}
+
+function formatPromptChoice(
+  t: ReturnType<typeof useMessages>["agentLab"],
+  slot: AgentPromptSlot,
+  prompt: AgentInventoryPrompt | null | undefined,
+): string {
+  if (!prompt) return t.stageEmptyPrompt;
+  return `${t.stagePrompt[slot]} · ${prompt.name}`;
 }
 
 function sameSlot(

@@ -491,7 +491,7 @@ def _generate_reply(
         ),
     )
     request = ChatRequest(
-        model=profile,
+        model=_profile_for_workflow_chat(profile, state.workflow_thinking_level),
         system_prompt=AGENT_SYSTEM_PROMPT,
         user_prompt=prompt,
         temperature=0.2,
@@ -545,6 +545,18 @@ def _apply_workspace_patch(
             profile_store=profile_store,
             field="workflow_model_id",
         )
+    workflow_thinking_level = state.workflow_thinking_level
+    if "workflow_model_id" in patch and "workflow_thinking_level" not in patch:
+        profile = profile_store.get(workflow_model_id) if workflow_model_id else None
+        workflow_thinking_level = (
+            profile.thinking_level.value if profile is not None else "off"
+        )
+    if "workflow_thinking_level" in patch:
+        workflow_thinking_level = _coerce_workflow_thinking_level(
+            patch.get("workflow_thinking_level"),
+            workflow_model_id=workflow_model_id,
+            profile_store=profile_store,
+        )
     stage_model_ids = dict(state.stage_model_ids)
     if "stage_model_ids" in patch:
         stage_model_ids.update(
@@ -560,6 +572,7 @@ def _apply_workspace_patch(
         )
     return state.with_config(
         workflow_model_id=workflow_model_id,
+        workflow_thinking_level=workflow_thinking_level,
         stage_model_ids=stage_model_ids,
         stage_prompt_ids=stage_prompt_ids,
     )
@@ -1808,6 +1821,46 @@ def _coerce_prompt_slots(value: object, *, cache_root: Path) -> dict[str, str | 
     return result
 
 
+def _coerce_workflow_thinking_level(
+    value: object,
+    *,
+    workflow_model_id: str | None,
+    profile_store: ModelProfileStore,
+) -> str:
+    level = str(value or "off")
+    if level not in {item.value for item in ThinkingLevel}:
+        raise BridgeError.invalid_argument(
+            "workflow_thinking_level must be off, low, medium, or high.",
+            field="workflow_thinking_level",
+        )
+    if level == ThinkingLevel.OFF.value:
+        return level
+    if workflow_model_id is None:
+        raise BridgeError.invalid_argument(
+            "Select a workflow model before enabling thinking.",
+            field="workflow_thinking_level",
+        )
+    profile = profile_store.get(workflow_model_id)
+    if profile is None or profile.thinking_level is ThinkingLevel.OFF:
+        raise BridgeError.invalid_argument(
+            "The selected workflow model does not expose thinking mode.",
+            field="workflow_thinking_level",
+        )
+    return level
+
+
+def _profile_for_workflow_chat(
+    profile: ModelConfig,
+    workflow_thinking_level: str,
+) -> ModelConfig:
+    level = (
+        ThinkingLevel(workflow_thinking_level)
+        if workflow_thinking_level in {item.value for item in ThinkingLevel}
+        else ThinkingLevel.OFF
+    )
+    return replace(profile, thinking_level=level)
+
+
 def _coerce_model_id(
     value: object,
     *,
@@ -1861,6 +1914,7 @@ def _workspace_wire(state: AgentWorkspaceState) -> dict[str, object]:
     active = state.active()
     return {
         "workflow_model_id": state.workflow_model_id,
+        "workflow_thinking_level": state.workflow_thinking_level,
         "stage_model_ids": dict(state.stage_model_ids),
         "stage_prompt_ids": dict(state.stage_prompt_ids),
         "memories": list(state.memories),
@@ -2104,6 +2158,7 @@ def _llm_context(
     recent = active.messages[-_MAX_CONTEXT_MESSAGES:] if active else ()
     return {
         "workflow_model_id": state.workflow_model_id,
+        "workflow_thinking_level": state.workflow_thinking_level,
         "stage_model_ids": dict(state.stage_model_ids),
         "stage_prompt_ids": dict(state.stage_prompt_ids),
         "active_task": state.active_task.to_dict() if state.active_task else None,
@@ -2176,6 +2231,7 @@ def _inventory(profile_store: ModelProfileStore, cache_root: Path) -> dict[str, 
                 "model_id": profile.model_id,
                 "api_key_configured": bool(profile.api_keys),
                 "thinking_level": profile.thinking_level.value,
+                "supports_thinking": profile.thinking_level is not ThinkingLevel.OFF,
                 "max_output_tokens": profile.max_output_tokens,
                 "input_token_limit": profile.input_token_limit,
                 "concurrency_limit": profile.concurrency_limit,

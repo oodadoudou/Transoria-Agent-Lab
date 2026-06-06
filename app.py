@@ -99,7 +99,7 @@ NODE_MODULES = FRONTEND_DIR / "node_modules"
 DEFAULT_VITE_PORT = 5173
 DEFAULT_BRIDGE_PORT = 5018
 NPM_CMD = "npm.cmd" if sys.platform == "win32" else "npm"
-DEFAULT_UPDATE_REPOSITORY = "oodadoudou/Transoria"
+DEFAULT_UPDATE_REPOSITORY = "oodadoudou/Transoria-Agent-Lab"
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ from transoria.bridge.handlers.settings import default_store
 from transoria.bridge.task_service import TaskService
 from transoria.domain import TaskKind, TaskStatus
 from transoria.llm.client import ChatRequest, ChatResponse, LlmRequestError
-from transoria.llm.config import ModelConfig, ProviderFormat
+from transoria.llm.config import ModelConfig, ProviderFormat, ThinkingLevel
 from transoria.llm.usage import TokenUsage
 from transoria.model_profiles import ModelProfileStore
 from transoria.prompts import (
@@ -82,6 +82,21 @@ def _seed_weak_profile(cache_root: Path) -> ModelConfig:
     )
 
 
+def _seed_thinking_profile(cache_root: Path) -> ModelConfig:
+    store = ModelProfileStore.from_cache_root(cache_root)
+    return store.create(
+        ModelConfig(
+            id="profile-thinking",
+            display_name="Thinking Workflow",
+            provider_format=ProviderFormat.OPENAI,
+            base_url="https://example.com/v1",
+            model_id="thinking-model",
+            api_keys=("thinking-key",),
+            thinking_level=ThinkingLevel.MEDIUM,
+        )
+    )
+
+
 def _write_task(
     cache_root: Path,
     *,
@@ -112,12 +127,74 @@ def test_read_workspace_returns_default_history_and_inventory(tmp_path: Path) ->
     assert isinstance(inventory, dict)
     assert workspace["messages"]
     assert workspace["memories"] == []
+    assert workspace["workflow_thinking_level"] == "off"
     [profile] = inventory["profiles"]  # type: ignore[index]
     assert profile["id"] == "profile-workflow"
+    assert profile["supports_thinking"] is False
     assert profile["concurrency_limit"] == 3
     assert profile["rpm_limit"] == 120
     assert profile["tpm_limit"] == 60000
     assert profile["retry_attempts"] == 4
+
+
+def test_agent_workspace_thinking_follows_selected_workflow_profile(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_thinking_profile(tmp_path)
+    router = build_default_router(cache_root=tmp_path)
+
+    response = router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-thinking"}},
+    )
+
+    workspace = response["workspace"]
+    assert workspace["workflow_model_id"] == "profile-thinking"
+    assert workspace["workflow_thinking_level"] == "medium"
+    thinking_profile = next(
+        profile
+        for profile in response["inventory"]["profiles"]  # type: ignore[index]
+        if profile["id"] == "profile-thinking"
+    )
+    assert thinking_profile["supports_thinking"] is True
+
+
+def test_agent_workspace_rejects_thinking_for_non_thinking_profile(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    router = build_default_router(cache_root=tmp_path)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    with pytest.raises(BridgeError):
+        router.call(
+            "agent.update_workspace",
+            {"patch": {"workflow_thinking_level": "high"}},
+        )
+
+
+def test_agent_chat_uses_workspace_thinking_override(tmp_path: Path) -> None:
+    _seed_thinking_profile(tmp_path)
+    fake = FakeAgentClient('{"reply":"ok","draft":null}')
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-thinking"}},
+    )
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_thinking_level": "high"}},
+    )
+
+    router.call("agent.send_message", {"message": "hello"})
+
+    assert fake.requests
+    assert fake.requests[0].model.id == "profile-thinking"
+    assert fake.requests[0].model.thinking_level is ThinkingLevel.HIGH
 
 
 def test_agent_read_only_queries_do_not_mutate_workspace(tmp_path: Path) -> None:

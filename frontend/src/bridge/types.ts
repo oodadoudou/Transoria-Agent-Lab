@@ -121,6 +121,7 @@ export interface AgentActiveTask {
 
 export interface AgentWorkspace {
   workflow_model_id: string | null;
+  workflow_thinking_level: ThinkingLevel;
   stage_model_ids: Record<AgentModelSlot, string | null>;
   stage_prompt_ids: Record<AgentPromptSlot, string | null>;
   memories: string[];
@@ -141,6 +142,7 @@ export interface AgentInventoryProfile {
   model_id: string;
   api_key_configured: boolean;
   thinking_level: ThinkingLevel;
+  supports_thinking: boolean;
   max_output_tokens: number;
   input_token_limit: number;
   concurrency_limit: number;

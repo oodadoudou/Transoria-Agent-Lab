@@ -338,6 +338,9 @@ export interface Messages {
     configTitle: string;
     configSub: string;
     workflowModel: string;
+    workflowThinkingLevel: string;
+    workflowThinkingUnsupported: string;
+    workflowThinkingUsesModel: string;
     translationModel: string;
     termExtractModel: string;
     termReviewModel: string;
@@ -349,6 +352,7 @@ export interface Messages {
     modelNotConfigured: string;
     chatTitle: string;
     chatSub: string;
+    quickActions: string[];
     inputPlaceholder: string;
     send: string;
     sending: string;
