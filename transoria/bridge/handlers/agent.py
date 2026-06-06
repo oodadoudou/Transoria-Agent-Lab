@@ -650,6 +650,8 @@ def _generate_reply(
                     reply=reply,
                     draft=draft,
                     current_state=current_state,
+                    profile_store=profile_store,
+                    cache_root=cache_root,
                 )
                 if salvaged is not None:
                     try:
@@ -690,6 +692,8 @@ def _generate_reply(
                     reply=reply,
                     draft=draft,
                     current_state=current_state,
+                    profile_store=profile_store,
+                    cache_root=cache_root,
                 )
                 if salvaged is not None:
                     try:
@@ -822,6 +826,8 @@ def _salvage_invalid_agent_draft(
     reply: str,
     draft: AgentActionDraft,
     current_state: Mapping[str, object],
+    profile_store: ModelProfileStore,
+    cache_root: Path,
 ) -> AgentActionDraft | None:
     text = "\n".join((user_message, reply, draft.title, draft.summary))
     if draft.kind == "create_prompt_preset":
@@ -831,6 +837,14 @@ def _salvage_invalid_agent_draft(
             draft,
             text=text,
             current_state=current_state,
+        )
+    if draft.kind == "compound_config_update":
+        return _salvage_compound_draft(
+            draft,
+            text=text,
+            current_state=current_state,
+            profile_store=profile_store,
+            cache_root=cache_root,
         )
     return None
 
@@ -903,6 +917,93 @@ def _salvage_create_recipe_draft(
     )
 
 
+def _salvage_compound_draft(
+    draft: AgentActionDraft,
+    *,
+    text: str,
+    current_state: Mapping[str, object],
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+) -> AgentActionDraft | None:
+    actions: list[dict[str, object]] = []
+    concurrency = _extract_model_concurrency_update(text, profile_store=profile_store)
+    if concurrency is not None:
+        profile_id, limit = concurrency
+        actions.append(
+            {
+                "kind": "update_model_profile",
+                "title": "更新模型并发数",
+                "summary": f"将模型 {profile_id} 的并发数改为 {limit}。",
+                "payload": {
+                    "profile_id": profile_id,
+                    "patch": {"concurrency_limit": limit},
+                },
+            }
+        )
+    prompt_rename = _extract_prompt_rename(text, cache_root=cache_root)
+    if prompt_rename is not None:
+        preset, old_name, new_name = prompt_rename
+        if preset.is_system:
+            actions.append(
+                {
+                    "kind": "create_prompt_preset",
+                    "title": "创建 Prompt 自定义副本",
+                    "summary": (
+                        f"内置 Prompt {old_name} 为只读；创建同内容的自定义副本 "
+                        f"{new_name}。"
+                    ),
+                    "payload": {
+                        "kind": preset.kind.value,
+                        "name": new_name,
+                        "description": f"从内置 Prompt {old_name} 复制创建。",
+                        "system_prompt": preset.system_prompt,
+                        "enabled": preset.enabled,
+                    },
+                }
+            )
+        else:
+            actions.append(
+                {
+                    "kind": "update_prompt_preset",
+                    "title": "重命名 Prompt",
+                    "summary": f"将 Prompt {old_name} 重命名为 {new_name}。",
+                    "payload": {
+                        "id": preset.id,
+                        "patch": {"name": new_name},
+                    },
+                }
+            )
+    recipe_name = _extract_recipe_save_name(text)
+    if recipe_name:
+        stage_models = current_state.get("stage_model_ids")
+        stage_prompts = current_state.get("stage_prompt_ids")
+        actions.append(
+            {
+                "kind": "create_recipe",
+                "title": "保存当前阶段配置",
+                "summary": f"保存当前阶段配置为 {recipe_name}。",
+                "payload": {
+                    "name": recipe_name,
+                    "description": "由 Agent Lab 根据当前工作区阶段配置创建。",
+                    "stage_model_ids": dict(stage_models)
+                    if isinstance(stage_models, Mapping)
+                    else {},
+                    "stage_prompt_ids": dict(stage_prompts)
+                    if isinstance(stage_prompts, Mapping)
+                    else {},
+                },
+            }
+        )
+    if not actions:
+        return None
+    return AgentActionDraft.create(
+        kind=draft.kind,
+        title=draft.title,
+        summary=draft.summary,
+        payload={"actions": actions},
+    )
+
+
 def _build_prompt_body_from_request(
     *,
     prompt_kind: PromptKind,
@@ -938,6 +1039,104 @@ def _extract_named_value(text: str) -> str:
     if not match:
         return ""
     return match.group(1).strip("『』「」“”\"' ")[:_MAX_RECIPE_NAME_LENGTH]
+
+
+def _extract_model_concurrency_update(
+    text: str,
+    *,
+    profile_store: ModelProfileStore,
+) -> tuple[str, int] | None:
+    match = re.search(
+        r"模型\s+([A-Za-z0-9_.\-]+)\s+的?并发(?:数)?(?:改成|修改为|设置为|设为|=)\s*(\d+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    profile = _resolve_model_profile_by_label(match.group(1), profile_store)
+    if profile is None:
+        return None
+    limit = int(match.group(2))
+    if limit < 0:
+        return None
+    return profile.id, limit
+
+
+def _resolve_model_profile_by_label(
+    label: str,
+    profile_store: ModelProfileStore,
+) -> ModelConfig | None:
+    normalized = _normalize_lookup_label(label)
+    matches = [
+        profile
+        for profile in profile_store.load()
+        if _normalize_lookup_label(profile.id) == normalized
+        or _normalize_lookup_label(profile.display_name) == normalized
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _extract_prompt_rename(
+    text: str,
+    *,
+    cache_root: Path,
+) -> tuple[PromptPreset, str, str] | None:
+    match = re.search(
+        r"(?:(翻译|术语提取|术语审核|术语审查)\s*)?Prompt\s*[「『“\"](.+?)[」』”\"]\s*(?:重命名为|改名为|改成|修改为)\s*[「『“\"](.+?)[」』”\"]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    kind_text, old_name, new_name = match.groups()
+    kinds = (
+        (_coerce_prompt_kind(kind_text, fallback_text=kind_text),)
+        if kind_text
+        else tuple(PromptKind)
+    )
+    preset = _resolve_prompt_by_name(old_name, kinds=kinds, cache_root=cache_root)
+    if preset is None:
+        return None
+    return preset, old_name.strip(), new_name.strip()[:_MAX_TITLE_LENGTH]
+
+
+def _resolve_prompt_by_name(
+    name: str,
+    *,
+    kinds: tuple[PromptKind, ...],
+    cache_root: Path,
+) -> PromptPreset | None:
+    normalized = _normalize_lookup_label(name)
+    matches: list[PromptPreset] = []
+    for kind in kinds:
+        matches.extend(
+            preset
+            for preset in _prompt_store_for(cache_root, kind).load()
+            if _normalize_lookup_label(preset.id) == normalized
+            or _normalize_lookup_label(preset.name) == normalized
+        )
+    if len(matches) == 1:
+        return matches[0]
+    custom_matches = [preset for preset in matches if not preset.is_system]
+    if len(custom_matches) == 1:
+        return custom_matches[0]
+    return None
+
+
+def _extract_recipe_save_name(text: str) -> str:
+    matches = re.findall(
+        r"(?:保存成|保存为|存成|存为)(?:名为|名字叫|叫)?[「『“\"](.+?)[」』”\"](?:的)?(?:预设|配方)",
+        text,
+    )
+    if not matches:
+        return ""
+    return matches[-1].strip()[:_MAX_RECIPE_NAME_LENGTH]
+
+
+def _normalize_lookup_label(value: str) -> str:
+    return value.strip().lower().replace(" ", "").replace("·", "")
 
 
 def _draft_revision_prompt(adjustment: str, draft: AgentActionDraft) -> str:
@@ -1403,7 +1602,7 @@ def _apply_compound_config_action(
 def _coerce_compound_action_drafts(
     payload: Mapping[str, object],
 ) -> list[AgentActionDraft]:
-    raw_actions = payload.get("actions")
+    raw_actions = _compound_raw_actions(payload)
     if not isinstance(raw_actions, list):
         raise BridgeError.invalid_argument(
             "compound draft payload.actions must be a list.",
@@ -1441,6 +1640,12 @@ def _coerce_compound_action_drafts(
             )
         action_payload = raw.get("payload")
         if not isinstance(action_payload, Mapping):
+            action_payload = {
+                key: value
+                for key, value in raw.items()
+                if key not in {"kind", "title", "summary", "payload"}
+            }
+        if not isinstance(action_payload, Mapping) or not action_payload:
             raise BridgeError.invalid_argument(
                 "compound action payload must be an object.",
                 field=f"actions[{index}].payload",
@@ -1454,6 +1659,35 @@ def _coerce_compound_action_drafts(
             )
         )
     return drafts
+
+
+def _compound_raw_actions(payload: Mapping[str, object]) -> object:
+    raw_actions = _first_present(
+        payload,
+        (
+            "actions",
+            "action",
+            "operations",
+            "operation",
+            "changes",
+            "config_changes",
+            "configChanges",
+            "updates",
+            "修改",
+            "动作",
+        ),
+    )
+    if isinstance(raw_actions, Mapping):
+        if "kind" in raw_actions:
+            return [raw_actions]
+        mapped: list[dict[str, object]] = []
+        for kind in _agent_action_specs():
+            value = raw_actions.get(kind)
+            if isinstance(value, Mapping):
+                mapped.append({"kind": kind, "payload": dict(value)})
+        if mapped:
+            return mapped
+    return raw_actions
 
 
 def _preview_compound_state(
@@ -2690,7 +2924,30 @@ def _draft_wire(draft: AgentActionDraft) -> dict[str, object]:
 
 
 def _sanitize_draft_payload(draft: AgentActionDraft) -> dict[str, object]:
-    return _sanitize_preview_value(draft.payload)  # type: ignore[return-value]
+    payload = _normalized_draft_payload_for_wire(draft)
+    return _sanitize_preview_value(payload)  # type: ignore[return-value]
+
+
+def _normalized_draft_payload_for_wire(
+    draft: AgentActionDraft,
+) -> Mapping[str, object]:
+    if draft.kind != "compound_config_update":
+        return draft.payload
+    try:
+        actions = _coerce_compound_action_drafts(draft.payload)
+    except BridgeError:
+        return draft.payload
+    return {
+        "actions": [
+            {
+                "kind": action.kind,
+                "title": action.title,
+                "summary": action.summary,
+                "payload": dict(action.payload),
+            }
+            for action in actions
+        ]
+    }
 
 
 def _sanitize_preview_value(value: object, *, key: str | None = None) -> object:

@@ -20,6 +20,7 @@ from transoria.prompts import (
     DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
     DEFAULT_TRANSLATION_PRESET_ID,
     PromptKind,
+    PromptPreset,
     PromptPresetStore,
 )
 from transoria.runtime.task_record import TaskRecord
@@ -127,6 +128,30 @@ def _seed_thinking_profile(cache_root: Path) -> ModelConfig:
             thinking_level=ThinkingLevel.MEDIUM,
         )
     )
+
+
+def _seed_custom_prompt(
+    cache_root: Path,
+    *,
+    kind: PromptKind,
+    preset_id: str,
+    name: str,
+) -> PromptPreset:
+    store = PromptPresetStore(
+        path=cache_root / f"prompts.{kind.value}.json",
+        kind=kind,
+    )
+    preset = PromptPreset(
+        id=preset_id,
+        name=name,
+        kind=kind,
+        system_prompt="Custom prompt body.",
+        description="Custom test preset.",
+        enabled=True,
+        is_system=False,
+    )
+    store.save([*store.load(), preset])
+    return preset
 
 
 def _write_task(
@@ -1591,6 +1616,206 @@ def test_agent_compound_draft_applies_workspace_and_model_profile_updates(
         "update_workspace",
         "update_model_profile",
     ]
+
+
+def test_agent_compound_draft_accepts_action_aliases(
+    tmp_path: Path,
+) -> None:
+    router, _ = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "I prepared one proposal with a model update.",
+          "draft": {
+            "kind": "compound_config_update",
+            "title": "Update model limits",
+            "summary": "Raises concurrency for the selected model.",
+            "payload": {
+              "changes": [
+                {
+                  "kind": "update_model_profile",
+                  "profile_id": "profile-workflow",
+                  "patch": {
+                    "concurrency_limit": 4
+                  }
+                }
+              ]
+            }
+          }
+        }
+        """,
+    )
+
+    draft = router.call(
+        "agent.send_message",
+        {"message": "把模型 Workflow 的并发数改成 4"},
+    )["workspace"]["pending_draft"]
+
+    assert draft["kind"] == "compound_config_update"
+    [action] = draft["payload"]["actions"]
+    assert action["kind"] == "update_model_profile"
+    assert action["payload"] == {
+        "profile_id": "profile-workflow",
+        "patch": {"concurrency_limit": 4},
+    }
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    stored = ModelProfileStore.from_cache_root(tmp_path).get("profile-workflow")
+    assert stored is not None
+    assert stored.concurrency_limit == 4
+    assert applied["result"]["results"][0]["kind"] == "update_model_profile"
+
+
+def test_agent_salvages_malformed_compound_draft_from_chinese_request(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    custom_prompt = _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.TRANSLATION,
+        preset_id="translation-custom-default",
+        name="默认",
+    )
+    fake = SequenceAgentClient(
+        [
+            """
+            {
+              "reply": "我已为您准备了复合配置修改草案。",
+              "draft": {
+                "kind": "compound_config_update",
+                "title": "复合配置修改",
+                "summary": "修改模型并发数、Prompt 名称，并保存当前阶段配置。",
+                "payload": {}
+              }
+            }
+            """,
+            """
+            {
+              "reply": "已重新整理草案。",
+              "draft": {
+                "kind": "compound_config_update",
+                "title": "复合配置修改",
+                "summary": "修改模型并发数、Prompt 名称，并保存当前阶段配置。",
+                "payload": {}
+              }
+            }
+            """,
+        ]
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {
+                    "translation": "profile-workflow",
+                    "term_extract": "profile-workflow",
+                    "term_review": "profile-workflow",
+                },
+                "stage_prompt_ids": {"translation": custom_prompt.id},
+            }
+        },
+    )
+
+    message = (
+        "请帮我准备一个配置修改草案：把模型 Workflow 的并发数改成 4，"
+        "把翻译 Prompt「默认」重命名为「标准中文翻译预设」，"
+        "并把当前阶段配置保存成名为「测试复合配置」的预设。"
+    )
+    response = router.call("agent.send_message", {"message": message})
+    draft = response["workspace"]["pending_draft"]
+
+    assert draft["kind"] == "compound_config_update"
+    actions = draft["payload"]["actions"]
+    assert [action["kind"] for action in actions] == [
+        "update_model_profile",
+        "update_prompt_preset",
+        "create_recipe",
+    ]
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    stored = ModelProfileStore.from_cache_root(tmp_path).get("profile-workflow")
+    assert stored is not None
+    assert stored.concurrency_limit == 4
+    prompts = PromptPresetStore(
+        path=tmp_path / "prompts.translation.json",
+        kind=PromptKind.TRANSLATION,
+    ).load()
+    renamed = next(preset for preset in prompts if preset.id == custom_prompt.id)
+    assert renamed.name == "标准中文翻译预设"
+    recipes = applied["workspace"]["recipes"]
+    assert any(recipe["name"] == "测试复合配置" for recipe in recipes)
+    assert [item["kind"] for item in applied["result"]["results"]] == [
+        "update_model_profile",
+        "update_prompt_preset",
+        "create_recipe",
+    ]
+
+
+def test_agent_salvages_system_prompt_rename_as_custom_copy(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = SequenceAgentClient(
+        [
+            """
+            {
+              "reply": "我已为您准备了复合配置修改草案。",
+              "draft": {
+                "kind": "compound_config_update",
+                "title": "复合配置修改",
+                "summary": "重命名 Prompt。",
+                "payload": {}
+              }
+            }
+            """,
+            """
+            {
+              "reply": "已重新整理草案。",
+              "draft": {
+                "kind": "compound_config_update",
+                "title": "复合配置修改",
+                "summary": "重命名 Prompt。",
+                "payload": {}
+              }
+            }
+            """,
+        ]
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "把翻译 Prompt「默认」重命名为「标准中文翻译预设」"},
+    )
+    draft = response["workspace"]["pending_draft"]
+
+    assert draft["kind"] == "compound_config_update"
+    [action] = draft["payload"]["actions"]
+    assert action["kind"] == "create_prompt_preset"
+    assert action["payload"]["kind"] == "translation"
+    assert action["payload"]["name"] == "标准中文翻译预设"
+    assert "内置 Prompt 默认 为只读" in action["summary"]
+
+    router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    prompts = PromptPresetStore(
+        path=tmp_path / "prompts.translation.json",
+        kind=PromptKind.TRANSLATION,
+    ).load()
+    custom = [
+        preset
+        for preset in prompts
+        if preset.name == "标准中文翻译预设" and not preset.is_system
+    ]
+    assert len(custom) == 1
 
 
 def test_agent_model_draft_with_unknown_profile_is_dropped(tmp_path: Path) -> None:
