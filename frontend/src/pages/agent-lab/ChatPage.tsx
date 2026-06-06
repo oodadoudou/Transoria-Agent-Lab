@@ -78,6 +78,7 @@ export function ChatPage() {
     void (async () => {
       try {
         applyResponse(await agentBridge.readWorkspace());
+        setError(null);
       } catch (err) {
         setError(
           `${t.loadFailed} ${err instanceof Error ? err.message : ""}`.trim(),

@@ -99,6 +99,7 @@ _MAX_RECIPE_NAME_LENGTH = 120
 _MAX_RECIPE_DESCRIPTION_LENGTH = 400
 _MAX_RECIPES = 50
 _MAX_COMPOUND_ACTIONS = 8
+_MAX_NOVEL_BACKGROUND_LENGTH = 6000
 _AGENT_TASK_KINDS: tuple[str, ...] = (
     "translation",
     "glossary",
@@ -607,12 +608,35 @@ def _generate_reply(
     conversation_context = _recent_conversation_context(state)
     direct = None
     if not user_message.startswith("The user clicked Adjust on the current pending draft."):
-        direct = _direct_glossary_extraction_response(
+        direct = _direct_glossary_review_response(
             user_message=user_message,
             conversation_context=conversation_context,
             state=state,
             current_state=current_state,
         )
+        if direct is None:
+            direct = _direct_translation_response(
+                user_message=user_message,
+                conversation_context=conversation_context,
+                state=state,
+                current_state=current_state,
+            )
+        if direct is None:
+            direct = _direct_glossary_extraction_response(
+                user_message=user_message,
+                conversation_context=conversation_context,
+                state=state,
+                current_state=current_state,
+            )
+        if direct is None:
+            direct = _direct_compound_config_response(
+                user_message=user_message,
+                current_state=current_state,
+                profile_store=profile_store,
+                cache_root=cache_root,
+            )
+        if direct is None:
+            direct = _direct_prompt_preset_response(user_message=user_message)
         if direct is None:
             direct = _direct_model_profile_copy_response(
                 user_message=user_message,
@@ -915,6 +939,165 @@ def _recent_conversation_context(
     ]
 
 
+def _direct_compound_config_response(
+    *,
+    user_message: str,
+    current_state: Mapping[str, object],
+    profile_store: ModelProfileStore,
+    cache_root: Path,
+) -> tuple[str, AgentActionDraft | None] | None:
+    if not _looks_like_direct_compound_config_request(user_message):
+        return None
+    draft = _salvage_compound_draft(
+        AgentActionDraft.create(
+            kind="compound_config_update",
+            title="复合配置修改",
+            summary="根据你的请求准备多个配置修改，并在确认后一次性应用。",
+            payload={"actions": []},
+        ),
+        text=user_message,
+        current_state=current_state,
+        profile_store=profile_store,
+        cache_root=cache_root,
+    )
+    if draft is None:
+        return None
+    actions = _compound_raw_actions(draft.payload)
+    count = len(actions) if isinstance(actions, list) else 0
+    return (
+        (
+            f"我已准备好包含 {count} 项修改的配置草案。"
+            "请检查每项修改，确认后我才会写入配置。"
+        ),
+        draft,
+    )
+
+
+def _direct_prompt_preset_response(
+    *,
+    user_message: str,
+) -> tuple[str, AgentActionDraft | None] | None:
+    if not _looks_like_direct_prompt_preset_request(user_message):
+        return None
+    try:
+        prompt_kind = _coerce_prompt_kind(None, fallback_text=user_message)
+    except BridgeError:
+        return (
+            "我理解你想创建 Prompt 预设，但还不清楚它属于哪个阶段。请说明是翻译、术语提取还是术语审查 Prompt。",
+            None,
+        )
+    name = _extract_prompt_create_name(user_message)
+    if not name:
+        return (
+            "我理解你想创建 Prompt 预设，但还缺预设名称。请告诉我这个 Prompt 要叫什么。",
+            None,
+        )
+    system_prompt = _extract_prompt_body_from_request(user_message)
+    if not system_prompt:
+        system_prompt = _build_prompt_body_from_request(
+            prompt_kind=prompt_kind,
+            user_request=user_message,
+        )
+    title = f"创建{name}"
+    payload = {
+        "kind": prompt_kind.value,
+        "name": name,
+        "description": f"由 Agent Lab 根据聊天请求创建的{name}。",
+        "system_prompt": system_prompt,
+        "enabled": True,
+    }
+    draft = AgentActionDraft.create(
+        kind="create_prompt_preset",
+        title=title,
+        summary=f"创建一套 { _prompt_kind_label(prompt_kind) } Prompt 预设：{name}。",
+        payload=payload,
+    )
+    return (
+        (
+            f"我已准备好创建 Prompt 预设「{name}」的草案。"
+            "请检查内容，确认后才会写入 Prompt 配置。"
+        ),
+        draft,
+    )
+
+
+def _looks_like_direct_prompt_preset_request(text: str) -> bool:
+    if _looks_like_translation_task_request(text):
+        return False
+    if _looks_like_glossary_review_request(text):
+        return False
+    if _looks_like_glossary_extraction_request(text):
+        return False
+    normalized = text.lower()
+    if "prompt" not in normalized and "提示词" not in text:
+        return False
+    return any(marker in text for marker in ("创建", "新建", "新增", "保存", "配置", "做一套", "准备一套"))
+
+
+def _extract_prompt_create_name(text: str) -> str:
+    patterns = (
+        r"(?:名字|名称|命名为|名为|叫做|叫)\s*[「『“\"'](.+?)[」』”\"']",
+        r"(?:名字|名称|命名为|名为|叫做|叫)\s*[:：]?\s*([^\n，。,.]+)",
+        r"(?:创建|新建|新增|配置|保存|准备)(?:一套|一个|新的)?\s*[「『“\"'](.+?)[」』”\"']\s*(?:的)?(?:Prompt|prompt|提示词)",
+        r"(?:创建|新建|新增|配置|保存|准备)(?:一套|一个|新的)?\s*(.+?)(?:Prompt|prompt|提示词)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        value = match.group(1).strip(" \t\r\n「」『』“”\"'：:")
+        value = re.sub(r"^(?:翻译|术语提取|术语审核|术语审查)\s*", "", value).strip()
+        if value:
+            return value[:_MAX_RECIPE_NAME_LENGTH]
+    return ""
+
+
+def _extract_prompt_body_from_request(text: str) -> str:
+    marker_pattern = (
+        r"(?:内容|正文|规则|要求|prompt|Prompt|提示词)\s*(?:如下|是|为)?\s*[:：]\s*(.+)"
+    )
+    match = re.search(marker_pattern, text, flags=re.DOTALL)
+    if match:
+        value = match.group(1).strip()
+        if value:
+            return value
+    return ""
+
+
+def _prompt_kind_label(kind: PromptKind) -> str:
+    return {
+        PromptKind.TRANSLATION: "翻译",
+        PromptKind.GLOSSARY: "术语提取",
+        PromptKind.GLOSSARY_REVIEW: "术语审查",
+    }[kind]
+
+
+def _looks_like_direct_compound_config_request(text: str) -> bool:
+    if _looks_like_translation_task_request(text):
+        return False
+    if _looks_like_glossary_review_request(text):
+        return False
+    if _looks_like_glossary_extraction_request(text):
+        return False
+    if _looks_like_model_profile_copy_request(text):
+        return False
+    normalized = text.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "并发",
+            "concurrency",
+            "重命名",
+            "改名",
+            "保存当前",
+            "保存成",
+            "保存为",
+            "存成",
+            "存为",
+        )
+    )
+
+
 def _direct_model_profile_copy_response(
     *,
     user_message: str,
@@ -1002,6 +1185,8 @@ def _direct_glossary_extraction_response(
     state: AgentWorkspaceState,
     current_state: Mapping[str, object],
 ) -> tuple[str, AgentActionDraft | None] | None:
+    if _looks_like_glossary_review_request(user_message):
+        return None
     context_text = "\n".join(
         str(item.get("content") or "") for item in conversation_context
     )
@@ -1083,6 +1268,223 @@ def _direct_glossary_extraction_response(
     )
 
 
+def _direct_glossary_review_response(
+    *,
+    user_message: str,
+    conversation_context: list[Mapping[str, object]],
+    state: AgentWorkspaceState,
+    current_state: Mapping[str, object],
+) -> tuple[str, AgentActionDraft | None] | None:
+    if not _looks_like_glossary_review_request(user_message):
+        return None
+    context_text = "\n".join(
+        str(item.get("content") or "") for item in conversation_context
+    )
+    task_id = _extract_glossary_task_id(user_message) or _extract_glossary_task_id(
+        context_text
+    )
+    if not task_id:
+        return (
+            "我理解你想启动术语审查。请提供已完成的 glossary task ID，例如 glossary-xxxxxxxxxxxx。",
+            None,
+        )
+    combined_text = "\n".join((context_text, user_message))
+    novel_background = _extract_novel_background(user_message) or _extract_novel_background(
+        combined_text
+    )
+    source_language = _extract_source_language(user_message) or _settings_default_value(
+        current_state,
+        "glossary_review",
+        "source_language",
+    )
+    target_language = _extract_target_language(user_message) or _settings_default_value(
+        current_state,
+        "glossary_review",
+        "target_language",
+    )
+    payload: dict[str, object] = {
+        "glossary_task_id": task_id,
+        "source_language": source_language,
+        "target_language": target_language,
+    }
+    if novel_background:
+        payload["novel_background"] = novel_background
+    completeness = assess_start_draft(
+        draft_kind="start_glossary_review_task",
+        state=state,
+        payload=payload,
+    )
+    if not completeness.complete:
+        missing = "、".join(completeness.missing)
+        return (
+            f"我理解你想审查术语，但当前术语审查任务配置还不完整：{missing}。请先补齐对应模型、Prompt 或语言设置。",
+            None,
+        )
+    draft = AgentActionDraft.create(
+        kind="start_glossary_review_task",
+        title="启动术语审查",
+        summary=f"使用术语提取任务 {task_id} 的术语表和参考文本启动术语审查。",
+        payload=payload,
+    )
+    return (
+        (
+            f"我已准备好术语审查任务草案，会读取术语提取任务 {task_id} 的输出产物。"
+            "请确认后再启动；本次背景和语言只作为任务覆盖项，不会写入手动设置。"
+        ),
+        draft,
+    )
+
+
+def _direct_translation_response(
+    *,
+    user_message: str,
+    conversation_context: list[Mapping[str, object]],
+    state: AgentWorkspaceState,
+    current_state: Mapping[str, object],
+) -> tuple[str, AgentActionDraft | None] | None:
+    if not _looks_like_translation_task_request(user_message):
+        return None
+    context_text = "\n".join(
+        str(item.get("content") or "") for item in conversation_context
+    )
+    combined_text = "\n".join((context_text, user_message))
+    input_dir, output_dir, _ = _extract_glossary_task_dirs(user_message)
+    if not input_dir:
+        input_dir, output_dir, _ = _extract_glossary_task_dirs(combined_text)
+    if not input_dir:
+        if not _extract_absolute_path_candidates(combined_text):
+            return None
+        return (
+            "我理解你想启动翻译。请提供 input 目录和一个独立的 output 目录；翻译输出不能默认写回输入目录。",
+            None,
+        )
+    if not output_dir:
+        return (
+            "我理解你想启动翻译，但还缺 output 目录。翻译输出需要使用独立目录，避免覆盖源文件。",
+            None,
+        )
+    if input_dir.rstrip("/") == output_dir.rstrip("/"):
+        return (
+            "我理解你想启动翻译，但 input 和 output 目录不能相同。请提供一个独立的 output 目录。",
+            None,
+        )
+    source_language = _extract_source_language(user_message) or _settings_default_value(
+        current_state,
+        "translation",
+        "source_language",
+    )
+    target_language = _extract_target_language(user_message) or _settings_default_value(
+        current_state,
+        "translation",
+        "target_language",
+    )
+    payload: dict[str, object] = {
+        "input_dir": input_dir,
+        "output_dir": output_dir,
+        "source_language": source_language,
+        "target_language": target_language,
+    }
+    glossary_task_id = _extract_glossary_task_id(user_message) or _extract_glossary_task_id(
+        context_text
+    )
+    if glossary_task_id:
+        payload["glossary_task_id"] = glossary_task_id
+    completeness = assess_start_draft(
+        draft_kind="start_translation_task",
+        state=state,
+        payload=payload,
+    )
+    if not completeness.complete:
+        missing = "、".join(completeness.missing)
+        return (
+            f"我理解你想启动翻译，但当前翻译任务配置还不完整：{missing}。请先补齐对应模型、Prompt 或语言设置。",
+            None,
+        )
+    glossary_note = (
+        f"并引用术语提取任务 {glossary_task_id} 的术语表。"
+        if glossary_task_id
+        else "不引用历史术语任务，使用当前翻译设置中的术语表。"
+    )
+    draft = AgentActionDraft.create(
+        kind="start_translation_task",
+        title="启动翻译",
+        summary=f"使用当前翻译模型和 Prompt 翻译指定目录，{glossary_note}",
+        payload=payload,
+    )
+    return (
+        (
+            "我已准备好翻译任务草案。"
+            f"{glossary_note}请确认后再启动；本次目录和语言只作为任务覆盖项，不会写入手动设置。"
+        ),
+        draft,
+    )
+
+
+def _looks_like_translation_task_request(text: str) -> bool:
+    normalized = text.lower()
+    if _looks_like_glossary_review_request(text) or _looks_like_glossary_extraction_request(
+        text
+    ):
+        return False
+    if any(marker in normalized for marker in ("prompt", "提示词", "预设")) and not any(
+        marker in normalized
+        for marker in (
+            "开始翻译",
+            "启动翻译",
+            "执行翻译",
+            "翻译任务",
+            "run translation",
+            "start translation",
+        )
+    ):
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "开始翻译",
+            "启动翻译",
+            "执行翻译",
+            "进行翻译",
+            "翻译任务",
+            "翻译小说",
+            "处理小说",
+            "run translation",
+            "start translation",
+            "translate novel",
+            "translate book",
+        )
+    ) or (
+        "翻译" in normalized
+        and bool(_extract_absolute_path_candidates(text))
+        and "模型配置" not in normalized
+    )
+
+
+def _looks_like_glossary_review_request(text: str) -> bool:
+    normalized = text.lower()
+    if not re.search(r"\bglossary-[a-z0-9-]+\b", normalized):
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "术语审查",
+            "术语审核",
+            "审查术语",
+            "审核术语",
+            "校对术语",
+            "review glossary",
+            "glossary review",
+        )
+    )
+
+
+def _extract_glossary_task_id(text: str) -> str | None:
+    match = re.search(r"\b(glossary-[a-zA-Z0-9-]+)\b", text)
+    if match is None:
+        return None
+    return match.group(1).strip()
+
+
 def _looks_like_glossary_extraction_request(text: str) -> bool:
     normalized = text.lower()
     if any(marker in normalized for marker in ("prompt", "提示词", "预设")) and not re.search(
@@ -1127,6 +1529,10 @@ def _looks_like_glossary_extraction_continuation(text: str) -> bool:
 
 def _should_discard_pending_for_new_message(text: str) -> bool:
     normalized = text.lower()
+    if _looks_like_translation_task_request(text):
+        return True
+    if _looks_like_glossary_review_request(text):
+        return True
     if _looks_like_glossary_extraction_request(text):
         return True
     if _looks_like_glossary_extraction_continuation(text):
@@ -1179,7 +1585,7 @@ def _extract_glossary_task_dirs(text: str) -> tuple[str, str | None, bool]:
 
 def _extract_labeled_path(text: str, labels: tuple[str, ...]) -> str | None:
     label_pattern = "|".join(re.escape(label) for label in labels)
-    pattern = rf"(?:{label_pattern})\s*(?:folder|dir|目录|路径)?\s*(?:是|为|=|:|：)?\s*(/.+)"
+    pattern = rf"(?:{label_pattern})\s*(?:folder|dir|目录|路径)?\s*(?:是|为|=|:|：)?\s*(/[^\n，。；;]+)"
     match = re.search(pattern, text, flags=re.IGNORECASE)
     if match is None:
         return None
@@ -1207,6 +1613,14 @@ def _trim_path_like_value(value: str) -> str:
         "。input",
         "。输出",
         "。输入",
+        "，output",
+        "，input",
+        "，输出",
+        "，输入",
+        "；output",
+        "；input",
+        "；输出",
+        "；输入",
         "。小说背景",
         "，小说背景",
         "；小说背景",
@@ -1237,6 +1651,9 @@ def _trim_path_like_value(value: str) -> str:
 
 
 def _extract_novel_background(text: str) -> str:
+    guide_block = _extract_novel_background_guide_block(text)
+    if guide_block:
+        return guide_block
     match = re.search(
         r"(?:小说背景|作品背景|背景(?:/类型)?|世界观|类型)\s*(?:是|为|=|:|：)?\s*(.+)",
         text,
@@ -1250,15 +1667,62 @@ def _extract_novel_background(text: str) -> str:
         " output",
         " 输入",
         " 输出",
-        "\n\n作品关键词",
-        "\n作品关键词",
-        "\n\n人物介绍",
-        "\n人物介绍",
     ):
         index = value.find(marker)
         if index > 0:
             value = value[:index]
-    return value.strip(" \t\r\n，。；;")
+    return _clean_novel_background_block(value)
+
+
+def _extract_novel_background_guide_block(text: str) -> str:
+    marker_match = re.search(r"(?:BL\s*)?作品指南", text)
+    if marker_match is not None:
+        return _clean_novel_background_block(text[marker_match.start() :])
+    background_match = re.search(
+        r"(?:小说背景|作品背景|背景(?:/类型)?|世界观|类型)\s*(?:是|为|=|:|：)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if background_match is None:
+        return ""
+    block = text[background_match.start() :]
+    if not any(marker in block for marker in ("作品关键词", "人物介绍", "角色介绍")):
+        return ""
+    return _clean_novel_background_block(block)
+
+
+def _clean_novel_background_block(value: str) -> str:
+    lines: list[str] = []
+    previous_blank = False
+    for raw_line in value.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if lines and not previous_blank:
+                lines.append("")
+                previous_blank = True
+            continue
+        if _looks_like_background_control_line(line):
+            continue
+        lines.append(line)
+        previous_blank = False
+    cleaned = "\n".join(lines).strip(" \t\r\n，。；;")
+    return cleaned[:_MAX_NOVEL_BACKGROUND_LENGTH].strip(" \t\r\n，。；;")
+
+
+def _looks_like_background_control_line(line: str) -> bool:
+    if re.match(r"^(?:input|output|输入|输出).*(?:/|目录|路径)", line, re.IGNORECASE):
+        return True
+    if re.match(r"^/[^，。；;]+$", line):
+        return True
+    return any(
+        marker in line
+        for marker in (
+            "输出和输入放在同一个",
+            "输入和输出放在同一个",
+            "输出目录默认",
+            "默认使用 input",
+        )
+    )
 
 
 def _extract_source_language(text: str) -> str:
@@ -1692,20 +2156,23 @@ def _extract_model_concurrency_update(
     *,
     profile_store: ModelProfileStore,
 ) -> tuple[str, int] | None:
-    match = re.search(
-        r"模型\s+([A-Za-z0-9_.\-]+)\s+的?并发(?:数)?(?:改成|修改为|设置为|设为|=)\s*(\d+)",
-        text,
-        flags=re.IGNORECASE,
+    patterns = (
+        r"(?:模型|model)\s*[「『“\"']?(.+?)[」』”\"']?\s*的?并发(?:数)?(?:改成|修改为|设置为|设为|=)\s*(\d+)",
+        r"[「『“\"']?([A-Za-z0-9_.\- ]+)[」』”\"']?\s*的?并发(?:数)?(?:改成|修改为|设置为|设为|=)\s*(\d+)",
     )
-    if not match:
-        return None
-    profile = _resolve_model_profile_by_label(match.group(1), profile_store)
-    if profile is None:
-        return None
-    limit = int(match.group(2))
-    if limit < 0:
-        return None
-    return profile.id, limit
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        label = match.group(1).strip(" \t\r\n「」『』“”\"'")
+        profile = _resolve_model_profile_by_label(label, profile_store)
+        if profile is None:
+            continue
+        limit = int(match.group(2))
+        if limit < 0:
+            continue
+        return profile.id, limit
+    return None
 
 
 def _resolve_model_profile_by_label(
@@ -2962,15 +3429,43 @@ def _active_task_is_terminal(
     active_task: AgentActiveTask,
     task_service: TaskService,
 ) -> bool:
-    try:
-        record = task_service.cache.load_record(active_task.task_id)
-    except (TaskNotFoundError, ValueError, OSError):
-        return True
-    return record.status in {
+    terminal_statuses = {
         TaskStatus.COMPLETED,
         TaskStatus.FAILED,
         TaskStatus.STOPPED,
     }
+    try:
+        record = task_service.cache.load_record(active_task.task_id)
+    except (TaskNotFoundError, ValueError, OSError):
+        record = None
+    else:
+        if record.status in terminal_statuses:
+            return True
+        if record.status is not TaskStatus.STOPPING:
+            return False
+
+    try:
+        response = task_service.read_snapshot(
+            kind=active_task.kind,
+            task_id=active_task.task_id,
+        )
+    except BridgeError:
+        pass
+    else:
+        snapshot = response.get("snapshot")
+        if isinstance(snapshot, Mapping):
+            raw_status = snapshot.get("status")
+            if isinstance(raw_status, str):
+                try:
+                    status = TaskStatus(raw_status)
+                except ValueError:
+                    return False
+                return status in terminal_statuses
+    try:
+        refreshed_record = task_service.cache.load_record(active_task.task_id)
+    except (TaskNotFoundError, ValueError, OSError):
+        return record is None
+    return refreshed_record.status in terminal_statuses
 
 
 def _raise_if_active_task_locked(state: AgentWorkspaceState) -> None:
