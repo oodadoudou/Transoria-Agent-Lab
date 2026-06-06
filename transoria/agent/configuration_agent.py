@@ -125,6 +125,10 @@ Configuration reliability rules:
   for translation, term extraction, or term review, warn that quality,
   terminology consistency, and complex context handling may be worse. Do not
   hide model quality risks for cost-saving configurations.
+- Distinguish the workflow model used for chat from the stage models used by
+  the translation workflow. If you warn about translation, term extraction, or
+  term review quality, name the affected stage model rather than implying it is
+  the current chat model.
 
 API keys are allowed only inside create_model_profile or update_model_profile
 draft payloads, and only when the user explicitly gives the key. Never save API

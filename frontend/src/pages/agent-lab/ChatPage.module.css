@@ -525,13 +525,173 @@
   text-transform: uppercase;
 }
 
-.draft pre {
-  max-height: 240px;
+.draftPreview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.draftSummary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.draftBadge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.draftActionList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.draftActionItem {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px;
+}
+
+.draftActionHeader {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.draftActionHeader strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.draftActionHeader p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.draftActionIndex {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.draftFields,
+.draftNestedFields {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.draftField,
+.draftNestedFields div {
+  display: grid;
+  grid-template-columns: minmax(86px, 0.24fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.draftField dt,
+.draftNestedFields dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.draftField dd,
+.draftNestedFields dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.draftNestedFields {
+  gap: 4px;
+}
+
+.draftNestedFields div {
+  grid-template-columns: minmax(76px, 0.28fr) minmax(0, 1fr);
+}
+
+.draftTextDetails {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 8px 10px;
+}
+
+.draftTextDetails summary {
+  cursor: pointer;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+
+.draftTextDetails div {
+  margin-top: 8px;
+  border-top: 1px solid var(--hairline);
+  padding-top: 8px;
+  white-space: pre-wrap;
+}
+
+.draftMiniList {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.draftMuted,
+.draftEmpty {
+  color: var(--muted);
+}
+
+.draftEmpty {
+  font-size: 12px;
+}
+
+.draftRawDetails {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.draftRawDetails summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.draftRawDetails pre {
+  max-height: 220px;
   overflow: auto;
   border: 1px solid var(--hairline);
   border-radius: 8px;
   background: var(--panel-soft);
   padding: 10px;
+  color: var(--ink);
   font-size: 11px;
   line-height: 1.5;
 }
