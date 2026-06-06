@@ -1111,6 +1111,87 @@ def test_agent_start_translation_draft_applies_with_task_lock(
     assert settings.translation.output_folder == ""
 
 
+def test_agent_directly_drafts_glossary_extraction_from_chat_inputs(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"请提取术语。input: {source_dir}。"
+                "小说背景：韩式现代奇幻，人物关系复杂。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_glossary_task"
+    assert draft["payload"]["input_dir"] == str(source_dir)
+    assert draft["payload"]["output_dir"] == str(source_dir)
+    assert draft["payload"]["source_language"] == "kr"
+    assert draft["payload"]["target_language"] == "zh"
+    assert draft["payload"]["novel_background"] == "韩式现代奇幻，人物关系复杂"
+    assert "默认输出到 input 目录" in response["workspace"]["messages"][-1]["content"]
+
+
+def test_agent_glossary_extraction_requires_background(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": f"提取术语，输入目录：{source_dir}"},
+    )
+
+    assert fake.requests == []
+    assert response["workspace"]["pending_draft"] is None
+    assert "请再提供小说背景" in response["workspace"]["messages"][-1]["content"]
+
+
 def test_agent_compound_draft_can_fill_recipe_and_start_translation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

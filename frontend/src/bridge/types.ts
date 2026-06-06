@@ -681,7 +681,14 @@ export interface GlossaryReviewFinalRow {
 export interface GlossaryReviewFinalSheet {
   task_id: string;
   path: string;
+  json_path?: string;
   rows: GlossaryReviewFinalRow[];
+}
+
+export interface GlossaryReviewFinalJsonExport {
+  task_id: string;
+  path: string;
+  count: number;
 }
 
 export interface ReplacementArtifacts {

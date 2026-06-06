@@ -901,11 +901,18 @@ export interface Messages {
       save: string;
       delete: string;
       deleteSelected: string;
+      exportJson: string;
+      importJson: string;
+      jsonBusy: string;
       selectedCount: string;
       saved: string;
       deleted: string;
       deletedMany: string;
       failed: string;
+      exportJsonSuccess: string;
+      exportJsonFailed: string;
+      importJsonSuccess: string;
+      importJsonFailed: string;
       dirty: string;
     };
   };

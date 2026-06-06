@@ -91,6 +91,13 @@ from transoria.workflows.glossary_review.orchestrator import (
     GlossaryReviewOrchestrator,
     GlossaryReviewResult,
 )
+from transoria.workflows.glossary_review.table_cache import (
+    final_table_cache_payload_from_xlsx,
+    final_table_cache_path,
+    read_or_create_final_table_cache,
+    rows_from_final_table_cache,
+    write_final_table_cache,
+)
 from transoria.workflows.translation.confidence import evaluate_segment_confidence
 from transoria.workflows.translation.rules import (
     Glossary,
@@ -3906,20 +3913,17 @@ class TaskService:
 
     def read_glossary_review_final(self, *, task_id: str) -> dict[str, object]:
         path = self._glossary_review_output_path(task_id)
-        loaded = load_glossary_xlsx(path)
+        task_dir = self.cache.task_dir(task_id)
+        cache_payload = read_or_create_final_table_cache(
+            task_dir=task_dir,
+            task_id=task_id,
+            source_path=path,
+        )
         return {
             "task_id": task_id,
             "path": str(path),
-            "rows": [
-                {
-                    "row_index": row.row_index,
-                    "src": row.src,
-                    "dst": row.dst,
-                    "info": row.info,
-                    "frequency": row.frequency,
-                }
-                for row in loaded.rows
-            ],
+            "json_path": str(final_table_cache_path(task_dir)),
+            "rows": rows_from_final_table_cache(cache_payload),
         }
 
     def update_glossary_review_final_row(
@@ -3953,6 +3957,7 @@ class TaskService:
             sheet.cell(row=row_index, column=loaded.target_col, value=dst.strip())
             sheet.cell(row=row_index, column=loaded.info_col, value=info.strip())
         workbook.save(path)
+        self._sync_glossary_review_final_cache_from_xlsx(task_id=task_id, path=path)
         return self.read_glossary_review_final(task_id=task_id)
 
     def delete_glossary_review_final_rows(
@@ -3982,6 +3987,7 @@ class TaskService:
         for row_index in sorted(set(row_indices), reverse=True):
             sheet.delete_rows(row_index, 1)
         workbook.save(path)
+        self._sync_glossary_review_final_cache_from_xlsx(task_id=task_id, path=path)
         return self.read_glossary_review_final(task_id=task_id)
 
     def restore_glossary_review_deleted_report_row(
@@ -4016,7 +4022,133 @@ class TaskService:
                 value=max(0, int(frequency)),
             )
         workbook.save(path)
+        self._sync_glossary_review_final_cache_from_xlsx(task_id=task_id, path=path)
         return self.read_glossary_review_final(task_id=task_id)
+
+    def export_glossary_review_final_json(
+        self,
+        *,
+        task_id: str,
+        output_path: str | None = None,
+    ) -> dict[str, object]:
+        final_path = self._glossary_review_output_path(task_id)
+        task_dir = self.cache.task_dir(task_id)
+        payload = read_or_create_final_table_cache(
+            task_dir=task_dir,
+            task_id=task_id,
+            source_path=final_path,
+        )
+        target = (
+            Path(output_path).expanduser()
+            if output_path
+            else self._default_glossary_review_json_export_path(final_path)
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return {
+            "task_id": task_id,
+            "path": str(target),
+            "count": len(rows_from_final_table_cache(payload)),
+        }
+
+    def import_glossary_review_final_json(
+        self,
+        *,
+        task_id: str,
+        input_path: str,
+    ) -> dict[str, object]:
+        source = Path(input_path).expanduser()
+        if not source.is_file():
+            raise BridgeError.not_found(
+                f"glossary review JSON file {str(source)!r} not found.",
+                details={"task_id": task_id, "path": str(source)},
+            )
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BridgeError.invalid_argument(
+                f"cannot read glossary review JSON: {exc}",
+                field="input_path",
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise BridgeError.invalid_argument(
+                "glossary review JSON must be an object.",
+                field="input_path",
+            )
+        rows = rows_from_final_table_cache(payload)
+        final_path = self._glossary_review_output_path(task_id)
+        self._write_glossary_review_final_rows_to_xlsx(
+            task_id=task_id,
+            path=final_path,
+            rows=rows,
+        )
+        return self.read_glossary_review_final(task_id=task_id)
+
+    def _sync_glossary_review_final_cache_from_xlsx(
+        self,
+        *,
+        task_id: str,
+        path: Path,
+    ) -> None:
+        payload = final_table_cache_payload_from_xlsx(
+            task_id=task_id,
+            source_path=path,
+        )
+        write_final_table_cache(
+            task_dir=self.cache.task_dir(task_id),
+            payload=payload,
+        )
+
+    def _write_glossary_review_final_rows_to_xlsx(
+        self,
+        *,
+        task_id: str,
+        path: Path,
+        rows: list[dict[str, object]],
+    ) -> None:
+        loaded = load_glossary_xlsx(path)
+        workbook = load_workbook(path)
+        sheet = workbook[loaded.sheet_name]
+        if sheet.max_row > 1:
+            sheet.delete_rows(2, sheet.max_row - 1)
+        offset = 2
+        for row in rows:
+            source = str(row.get("src") or "").strip()
+            target = str(row.get("dst") or "").strip()
+            if not source or not target:
+                continue
+            sheet.cell(row=offset, column=loaded.source_col, value=source)
+            sheet.cell(row=offset, column=loaded.target_col, value=target)
+            sheet.cell(
+                row=offset,
+                column=loaded.info_col,
+                value=str(row.get("info") or "").strip(),
+            )
+            if loaded.frequency_col is not None:
+                sheet.cell(
+                    row=offset,
+                    column=loaded.frequency_col,
+                    value=max(0, int(row.get("frequency") or 0)),
+                )
+            offset += 1
+        workbook.save(path)
+        self._sync_glossary_review_final_cache_from_xlsx(task_id=task_id, path=path)
+
+    def _default_glossary_review_json_export_path(self, final_path: Path) -> Path:
+        base = final_path.with_name(f"{final_path.stem}-table.json")
+        if not base.exists():
+            return base
+        for index in range(2, 1000):
+            candidate = final_path.with_name(f"{final_path.stem}-table-{index}.json")
+            if not candidate.exists():
+                return candidate
+        raise BridgeError.invalid_argument(
+            "too many glossary review JSON exports already exist.",
+            field="output_path",
+        )
 
     def _glossary_review_output_path(self, task_id: str) -> Path:
         try:

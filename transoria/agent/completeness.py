@@ -28,6 +28,7 @@ _REQUIRED_PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
         "output_dir",
         "source_language",
         "target_language",
+        "novel_background",
     ),
     "start_glossary_review_task": ("glossary_task_id",),
     "start_translation_task": (

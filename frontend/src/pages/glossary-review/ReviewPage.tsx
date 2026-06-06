@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
-import { BridgeError, glossaryReviewBridge, type GlossaryReviewFinalRow, type GlossaryReviewFinalSheet, type TaskHeader } from "@/bridge";
+import {
+  BridgeError,
+  dialogsBridge,
+  glossaryReviewBridge,
+  type GlossaryReviewFinalRow,
+  type GlossaryReviewFinalSheet,
+  type TaskHeader,
+} from "@/bridge";
 import { format, useMessages } from "@/locales";
 import { Panel } from "@/components/Panel";
 import { Pill } from "@/components/Pill";
@@ -51,6 +58,7 @@ export function ReviewPage() {
   const [sortState, setSortState] = useState<SortState | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [jsonBusy, setJsonBusy] = useState(false);
   const [importingFinal, setImportingFinal] = useState(false);
   const [importDecision, setImportDecision] = useState<{
     outputPath: string;
@@ -378,6 +386,73 @@ export function ReviewPage() {
     }
   };
 
+  const handleExportJson = async () => {
+    if (!activeTaskId || !sheet || jsonBusy) return;
+    setJsonBusy(true);
+    setFeedback(null);
+    try {
+      const filename =
+        sheet.path
+          .split(/[\\/]/)
+          .pop()
+          ?.replace(/\.[^.]+$/, "-table.json") || "glossary-review-table.json";
+      const choice = await dialogsBridge.chooseSavePath(filename, ["json"]);
+      if (!choice.path) return;
+      const result = await glossaryReviewBridge.exportFinalJson(
+        activeTaskId,
+        choice.path,
+      );
+      setFeedback({
+        kind: "success",
+        text: format(labels.exportJsonSuccess, {
+          n: result.count,
+          path: result.path,
+        }),
+      });
+    } catch (error) {
+      setFeedback({
+        kind: "error",
+        text: format(labels.exportJsonFailed, { reason: errorText(error) }),
+      });
+    } finally {
+      setJsonBusy(false);
+    }
+  };
+
+  const handleImportJson = async () => {
+    if (!activeTaskId || jsonBusy) return;
+    setJsonBusy(true);
+    setFeedback(null);
+    try {
+      const choice = await dialogsBridge.chooseGlossaryFile({
+        allowXlsx: false,
+        allowJson: true,
+      });
+      if (!choice.path) return;
+      const next = await glossaryReviewBridge.importFinalJson(
+        activeTaskId,
+        choice.path,
+      );
+      setSheet(next);
+      const first = next.rows[0] ?? null;
+      setSelectedRowIndex(first?.row_index ?? null);
+      setSelectedRowIndices(first ? new Set([first.row_index]) : new Set());
+      setSelectionAnchor(first?.row_index ?? null);
+      setDraft(first ? rowToDraft(first) : { src: "", dst: "", info: "" });
+      setFeedback({
+        kind: "success",
+        text: format(labels.importJsonSuccess, { n: next.rows.length }),
+      });
+    } catch (error) {
+      setFeedback({
+        kind: "error",
+        text: format(labels.importJsonFailed, { reason: errorText(error) }),
+      });
+    } finally {
+      setJsonBusy(false);
+    }
+  };
+
   const selectedCount = selectedRowIndices.size;
   const allVisibleSelected =
     rows.length > 0 && rows.every((row) => selectedRowIndices.has(row.row_index));
@@ -409,7 +484,21 @@ export function ReviewPage() {
           {sheet ? format(labels.pathHint, { path: sheet.path }) : null}
         </span>
         <Pill
-          disabled={!sheet || importingFinal || saving}
+          variant="ghost"
+          disabled={!sheet || jsonBusy || saving}
+          onClick={() => void handleExportJson()}
+        >
+          {jsonBusy ? labels.jsonBusy : labels.exportJson}
+        </Pill>
+        <Pill
+          variant="ghost"
+          disabled={!activeTaskId || jsonBusy || saving}
+          onClick={() => void handleImportJson()}
+        >
+          {jsonBusy ? labels.jsonBusy : labels.importJson}
+        </Pill>
+        <Pill
+          disabled={!sheet || importingFinal || saving || jsonBusy}
           onClick={() => void handleImportFinal()}
         >
           {importingFinal

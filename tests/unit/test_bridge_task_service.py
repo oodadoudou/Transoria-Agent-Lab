@@ -531,12 +531,38 @@ def test_glossary_review_final_sheet_can_be_edited(tmp_path: Path):
         frequency=2,
     )
     assert [row["src"] for row in final_sheet["rows"]] == ["신해범", "유리"]
+    json_path = service.cache.task_dir(task_id) / "final-table.json"
+    assert json_path.exists()
+    cached_payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert [row["src"] for row in cached_payload["rows"]] == ["신해범", "유리"]
+
+    exported = service.export_glossary_review_final_json(task_id=task_id)
+    exported_path = Path(str(exported["path"]))
+    assert exported_path.exists()
+    assert exported["count"] == 2
+
+    import_path = folder / "edited-final-table.json"
+    imported_payload = dict(cached_payload)
+    imported_payload["rows"] = [
+        {"src": "", "dst": "", "info": "", "frequency": 0},
+        {"src": "신해범", "dst": "申海范", "info": "角色/男性角色", "frequency": 5},
+        {"src": "유리", "dst": "琉璃", "info": "角色/女性角色", "frequency": 2},
+    ]
+    import_path.write_text(
+        json.dumps(imported_payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    final_sheet = service.import_glossary_review_final_json(
+        task_id=task_id,
+        input_path=str(import_path),
+    )
+    assert [row["dst"] for row in final_sheet["rows"]] == ["申海范", "琉璃"]
     output_book = load_workbook(folder / "reviewed.xlsx")
     rows = list(output_book.active.iter_rows(values_only=True))
     assert rows == [
         ("src", "dst", "info", "frequency"),
         ("신해범", "申海范", "角色/男性角色", 5),
-        ("유리", "尤莉", "人物", 2),
+        ("유리", "琉璃", "角色/女性角色", 2),
     ]
 
 

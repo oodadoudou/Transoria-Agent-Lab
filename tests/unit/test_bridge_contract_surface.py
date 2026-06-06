@@ -130,6 +130,8 @@ EXPECTED_METHODS: tuple[str, ...] = (
     "glossary_review.update_final_row",
     "glossary_review.delete_final_rows",
     "glossary_review.restore_deleted_report_row",
+    "glossary_review.export_final_json",
+    "glossary_review.import_final_json",
     # rules (translation-side text-preserve / pre / post replacement)
     "rules.import_rules",
     "rules.export_rules",
@@ -238,7 +240,8 @@ def test_backend_registers_full_contract(router):
     # 4 added 2026-06-06 (agent recipe create/update/delete/apply).
     # 6 added 2026-06-06 (agent read-only status/config query surface).
     # 1 added 2026-06-06 (agent draft revision).
-    assert len(actual) == 150
+    # 2 added 2026-06-06 (glossary_review final JSON import/export).
+    assert len(actual) == 152
 # Test 2 — frontend bridge wraps every backend method
 
 
@@ -386,6 +389,11 @@ MIN_PAYLOADS: dict[str, dict[str, object]] = {
         "dst": "y",
         "info": "",
         "frequency": 0,
+    },
+    "glossary_review.export_final_json": {"task_id": "missing"},
+    "glossary_review.import_final_json": {
+        "task_id": "missing",
+        "input_path": "/nonexistent-final-table.json",
     },
     "rules.import_rules": {
         "kind": "text_preserve",

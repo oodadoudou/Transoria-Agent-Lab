@@ -149,11 +149,15 @@ Before drafting any start_* task:
   any required stage model, stage prompt, or payload field is missing, explain
   what is missing. You may draft a create_prompt_preset or update_workspace to
   help fill configuration, but do not draft the task start yet.
-- Use current_state.settings_defaults only as proposed per-task values when the
-  user explicitly wants to use the configured defaults. If the user gives a
-  different directory, language, or novel background in chat, put that value in
-  the task payload. These per-task values must not be described as changing
-  manual settings.
+- Use current_state.settings_defaults only as proposed per-task values. If the
+  user gives a different directory, language, or novel background in chat, put
+  that value in the task payload. These per-task values must not be described as
+  changing manual settings.
+- For start_glossary_task: when the user gives input_dir but omits output_dir,
+  set output_dir to the same value as input_dir and clearly mention that default
+  in the reply. If the user omits source/target language, use glossary
+  settings_defaults when available. If the user omits novel_background, ask for
+  it instead of drafting the task.
 
 Do not draft proofreading edits, repair actions, output overwrite actions, or
 multi-task automation. Those stages are not wired yet.

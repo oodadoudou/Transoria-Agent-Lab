@@ -592,11 +592,17 @@ def _generate_reply(
     conversation_context = _recent_conversation_context(state)
     direct = None
     if not user_message.startswith("The user clicked Adjust on the current pending draft."):
-        direct = _direct_model_profile_copy_response(
+        direct = _direct_glossary_extraction_response(
             user_message=user_message,
-            conversation_context=conversation_context,
-            profile_store=profile_store,
+            state=state,
+            current_state=current_state,
         )
+        if direct is None:
+            direct = _direct_model_profile_copy_response(
+                user_message=user_message,
+                conversation_context=conversation_context,
+                profile_store=profile_store,
+            )
     if direct is not None:
         reply, draft = direct
         if draft is not None:
@@ -965,6 +971,208 @@ def _direct_model_profile_copy_response(
         ),
         draft,
     )
+
+
+def _direct_glossary_extraction_response(
+    *,
+    user_message: str,
+    state: AgentWorkspaceState,
+    current_state: Mapping[str, object],
+) -> tuple[str, AgentActionDraft | None] | None:
+    if not _looks_like_glossary_extraction_request(user_message):
+        return None
+    input_dir, output_dir, output_defaulted = _extract_glossary_task_dirs(user_message)
+    if not input_dir:
+        return (
+            "我理解你想提取术语。请提供 input 目录；如果不提供 output 目录，我会默认使用 input 目录作为输出目录。",
+            None,
+        )
+    novel_background = _extract_novel_background(user_message)
+    if not novel_background:
+        return (
+            "我理解你想提取术语。请再提供小说背景，这会进入本次任务配置，不会写入手动设置页。",
+            None,
+        )
+    source_language = _extract_source_language(user_message) or _settings_default_value(
+        current_state,
+        "glossary",
+        "source_language",
+    )
+    target_language = _extract_target_language(user_message) or _settings_default_value(
+        current_state,
+        "glossary",
+        "target_language",
+    )
+    payload = {
+        "input_dir": input_dir,
+        "output_dir": output_dir or input_dir,
+        "source_language": source_language,
+        "target_language": target_language,
+        "novel_background": novel_background,
+    }
+    completeness = assess_start_draft(
+        draft_kind="start_glossary_task",
+        state=state,
+        payload=payload,
+    )
+    if not completeness.complete:
+        missing = "、".join(completeness.missing)
+        return (
+            f"我理解你想提取术语，但当前术语提取任务配置还不完整：{missing}。请先补齐对应模型、Prompt 或语言设置。",
+            None,
+        )
+    note = "未提供 output 目录，草案会默认输出到 input 目录。" if output_defaulted else ""
+    draft = AgentActionDraft.create(
+        kind="start_glossary_task",
+        title="启动术语提取",
+        summary="使用当前术语提取模型和 Prompt，从指定目录提取术语表。",
+        payload=payload,
+    )
+    return (
+        (
+            "我已准备好术语提取任务草案。"
+            f"{note}请确认后再启动；本次目录和背景只作为任务覆盖项，不会写入手动设置。"
+        ),
+        draft,
+    )
+
+
+def _looks_like_glossary_extraction_request(text: str) -> bool:
+    normalized = text.lower()
+    if any(marker in normalized for marker in ("prompt", "提示词", "预设")) and not re.search(
+        r"/|input|output|输入|输出|目录|路径",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "提取术语",
+            "术语提取",
+            "处理术语",
+            "抽取术语",
+            "extract glossary",
+            "glossary extraction",
+            "extract terms",
+            "term extraction",
+        )
+    )
+
+
+def _extract_glossary_task_dirs(text: str) -> tuple[str, str | None, bool]:
+    input_dir = _extract_labeled_path(
+        text,
+        ("input", "输入目录", "输入路径", "源目录", "原文目录", "小说目录"),
+    )
+    output_dir = _extract_labeled_path(
+        text,
+        ("output", "输出目录", "输出路径", "导出目录", "结果目录"),
+    )
+    candidates = _extract_absolute_path_candidates(text)
+    if input_dir is None and candidates:
+        input_dir = candidates[0]
+    if output_dir is None and len(candidates) > 1:
+        output_dir = candidates[1]
+    if input_dir is None:
+        return "", output_dir, False
+    return input_dir, output_dir, output_dir is None
+
+
+def _extract_labeled_path(text: str, labels: tuple[str, ...]) -> str | None:
+    label_pattern = "|".join(re.escape(label) for label in labels)
+    pattern = rf"(?:{label_pattern})\s*(?:folder|dir|目录|路径)?\s*(?:是|为|=|:|：)?\s*(/.+)"
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    value = _trim_path_like_value(match.group(1))
+    return value or None
+
+
+def _extract_absolute_path_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in re.finditer(r"/[^\n，。；;]+", text):
+        value = _trim_path_like_value(match.group(0))
+        if value and value not in candidates:
+            candidates.append(value)
+    return candidates
+
+
+def _trim_path_like_value(value: str) -> str:
+    trimmed = value.strip(" \t\r\n`\"'“”")
+    stop_markers = (
+        " output",
+        " input",
+        " 输出",
+        " 输入",
+        "。output",
+        "。input",
+        "。输出",
+        "。输入",
+        "。小说背景",
+        "，小说背景",
+        "；小说背景",
+        "。背景",
+        "，背景",
+        "；背景",
+        " 小说背景",
+        " 背景",
+        "\n",
+    )
+    for marker in stop_markers:
+        index = trimmed.find(marker)
+        if index > 0:
+            trimmed = trimmed[:index]
+    return trimmed.strip(" \t\r\n，。；;`\"'“”")
+
+
+def _extract_novel_background(text: str) -> str:
+    match = re.search(
+        r"(?:小说背景|作品背景|背景|世界观)\s*(?:是|为|=|:|：)?\s*(.+)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match is None:
+        return ""
+    value = match.group(1).strip()
+    for marker in (" input", " output", " 输入", " 输出"):
+        index = value.find(marker)
+        if index > 0:
+            value = value[:index]
+    return value.strip(" \t\r\n，。；;")
+
+
+def _extract_source_language(text: str) -> str:
+    normalized = text.lower()
+    if any(marker in normalized for marker in ("韩译中", "韩文", "韩语", "korean", " kr", " ko")):
+        return "kr"
+    if any(marker in normalized for marker in ("日译中", "日文", "日语", "japanese", " ja", " jp")):
+        return "ja"
+    return ""
+
+
+def _extract_target_language(text: str) -> str:
+    normalized = text.lower()
+    if any(marker in normalized for marker in ("繁中", "繁体", "traditional chinese", "zh-hant")):
+        return "zh-Hant"
+    if any(marker in normalized for marker in ("译中", "中文", "简中", "简体", "chinese", " zh")):
+        return "zh"
+    return ""
+
+
+def _settings_default_value(
+    current_state: Mapping[str, object],
+    section: str,
+    key: str,
+) -> str:
+    defaults = current_state.get("settings_defaults")
+    if not isinstance(defaults, Mapping):
+        return ""
+    section_defaults = defaults.get(section)
+    if not isinstance(section_defaults, Mapping):
+        return ""
+    value = section_defaults.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _looks_like_model_profile_copy_request(text: str) -> bool:

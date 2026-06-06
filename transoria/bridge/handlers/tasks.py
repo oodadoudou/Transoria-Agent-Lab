@@ -176,6 +176,18 @@ def _build_handlers(
                 frequency=int(payload.get("frequency", 0)),
             )
         )
+        handlers[f"{kind}.export_final_json"] = (
+            lambda payload: service.export_glossary_review_final_json(
+                task_id=_expect_task_id(payload),
+                output_path=_optional_string(payload, "output_path"),
+            )
+        )
+        handlers[f"{kind}.import_final_json"] = (
+            lambda payload: service.import_glossary_review_final_json(
+                task_id=_expect_task_id(payload),
+                input_path=str(payload.get("input_path", "")),
+            )
+        )
     return handlers
 
 

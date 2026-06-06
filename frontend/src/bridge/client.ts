@@ -36,6 +36,7 @@ import type {
   GlossaryArtifacts,
   GlossaryFileResult,
   GlossaryReviewArtifacts,
+  GlossaryReviewFinalJsonExport,
   GlossaryReviewFinalSheet,
   GlossaryReviewInputCandidates,
   GlossaryReviewReport,
@@ -656,6 +657,24 @@ export const glossaryReviewBridge = {
     return call("glossary_review.restore_deleted_report_row", {
       task_id: taskId,
       ...row,
+    });
+  },
+  exportFinalJson(
+    taskId: string,
+    outputPath?: string,
+  ): Promise<GlossaryReviewFinalJsonExport> {
+    return call("glossary_review.export_final_json", {
+      task_id: taskId,
+      output_path: outputPath,
+    });
+  },
+  importFinalJson(
+    taskId: string,
+    inputPath: string,
+  ): Promise<GlossaryReviewFinalSheet> {
+    return call("glossary_review.import_final_json", {
+      task_id: taskId,
+      input_path: inputPath,
     });
   },
   listFailedSubtasks(taskId: string): Promise<{ failures: TaskFailure[] }> {
