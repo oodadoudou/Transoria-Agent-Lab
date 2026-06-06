@@ -216,7 +216,8 @@ export const en: Messages = {
   },
   appSettingsExtra: {
     colorTheme: "Color theme",
-    colorThemeHint: "Switch the app between light and dark appearance. Light is the default.",
+    colorThemeHint:
+      "Switch the app between light and dark appearance. Light is the default.",
     colorThemeLight: "Light",
     colorThemeDark: "Dark",
     uiScale: "UI scale",
@@ -245,7 +246,8 @@ export const en: Messages = {
     cacheManageAction: "Manage cache",
     cacheSummary: "{count} tasks · {size} on disk.",
     cacheSummaryEmpty: "No cached tasks.",
-    cacheRunningBlock: "A task is running; cache cleanup is temporarily disabled.",
+    cacheRunningBlock:
+      "A task is running; cache cleanup is temporarily disabled.",
     cacheModalTitle: "Manage task cache",
     cacheModalHint: "Pick a scope to clean. In-flight tasks are never deleted.",
     cachePurgeAll: "Delete all",
@@ -405,7 +407,8 @@ export const en: Messages = {
     execute: "Merge",
     stop: "Stop",
     previewLabel: "Preview",
-    noPlan: "Choose a folder and scan to preview mergeable EPUB files and the default output.",
+    noPlan:
+      "Choose a folder and scan to preview mergeable EPUB files and the default output.",
     noActions: "No EPUB files to merge.",
     epubsFound: "EPUB files",
     selectedCount: "Selected",
@@ -444,7 +447,8 @@ export const en: Messages = {
     filePlaceholder: "Choose or paste an .epub file path",
     chooseFile: "Choose EPUB",
     recursive: "Scan subfolders",
-    outputHint: "TXT files are written beside the source EPUB. Existing names get a numeric suffix.",
+    outputHint:
+      "TXT files are written beside the source EPUB. Existing names get a numeric suffix.",
     scan: "Scan preview",
     execute: "Convert",
     stop: "Stop",
@@ -493,14 +497,16 @@ export const en: Messages = {
     apply: "Save EPUB",
     openOutput: "Open output",
     dialogTitle: "Edit EPUB metadata",
-    dialogSub: "OK uses the title as the EPUB filename. If the output folder is blank, the input EPUB folder is used.",
+    dialogSub:
+      "OK uses the title as the EPUB filename. If the output folder is blank, the input EPUB folder is used.",
     cancel: "Cancel",
     ok: "OK",
     coverPlaceholder: "Leave empty to keep the source EPUB cover",
     compressOutput: "Also output a compressed EPUB",
     generatedOutput: "Will output as",
     overwriteTitle: "Output file matches the input file",
-    overwriteBody: "Continuing will overwrite the original EPUB. Choose No to do nothing.",
+    overwriteBody:
+      "Continuing will overwrite the original EPUB. Choose No to do nothing.",
     overwriteYes: "Overwrite",
     overwriteNo: "No",
     currentLabel: "Current EPUB",
@@ -510,7 +516,8 @@ export const en: Messages = {
     currentOutput: "Output location",
     coverPresent: "Cover present",
     coverMissing: "No cover",
-    noMetadata: "Choose an EPUB to read its current title, authors, and cover status.",
+    noMetadata:
+      "Choose an EPUB to read its current title, authors, and cover status.",
     saved: "New EPUB written.",
     savedCompressed: "New compressed EPUB written.",
   },
@@ -594,7 +601,8 @@ export const en: Messages = {
     send: "Send",
     sending: "Sending…",
     draftTitle: "Pending draft",
-    draftSub: "No configuration is written and no task is started until you confirm.",
+    draftSub:
+      "No configuration is written and no task is started until you confirm.",
     applyDraft: "Confirm",
     discardDraft: "Discard",
     noDraft: "No pending draft.",
@@ -611,8 +619,21 @@ export const en: Messages = {
     confirmationBoundary:
       "Permission boundary: the agent may prepare configuration and task actions, but every change or execution requires confirmation.",
     memoryTitle: "Memory",
-    memorySub: "Confirmed lightweight preferences. API keys and temporary task status are not stored here.",
+    memorySub:
+      "Confirmed lightweight preferences. API keys and temporary task status are not stored here.",
     memoryEmpty: "No confirmed memory yet.",
+    memoryAdd: "Add",
+    memoryAddPlaceholder:
+      "Add a stable preference, e.g. keep character names consistent.",
+    editMemory: "Edit",
+    deleteMemory: "Delete",
+    conversationsTitle: "Conversations",
+    conversationsSub:
+      "Each conversation keeps its own messages and drafts; config and memory are shared across the workspace.",
+    newConversation: "New conversation",
+    untitledConversation: "Untitled conversation",
+    renameConversation: "Rename",
+    deleteConversation: "Delete",
   },
   translation: {
     crumb: "Translation",
@@ -811,14 +832,16 @@ export const en: Messages = {
     proofreadingPage: {
       title: "Proofreading",
       sub: "Review and edit translations from settled runs; failed or stopped runs can be reviewed with their current results. Edits write to cache immediately. Click 'Regenerate output' to re-emit the original .epub / .txt files in place (overwrite).",
-      noTasks: "No tasks available for proofreading. Run, stop, or finish a translation first.",
+      noTasks:
+        "No tasks available for proofreading. Run, stop, or finish a translation first.",
       taskPicker: "Select task",
       loading: "Loading…",
       regenerateAction: "Regenerate output",
       regenerateBilingualAction: "Export bilingual",
       regenerating: "Generating…",
       regenerateSuccess: "Regenerated {n} files.",
-      regeneratePartial: "Regenerated {n} files, but some files failed: {reason}",
+      regeneratePartial:
+        "Regenerated {n} files, but some files failed: {reason}",
       regenerateFailed: "Regenerate failed: {reason}",
       regenerateFailureReasons: {
         noMatchingTranslations:
@@ -891,7 +914,8 @@ export const en: Messages = {
       retranslateSuccess: "Retranslated and saved to cache.",
       retranslateSelectedDone:
         "Batch retranslate finished: {done} completed, {stale} discarded, {failed} failed.",
-      retranslateSelectedDoneWithReasons: "{summary} Failure reasons: {reasons}.",
+      retranslateSelectedDoneWithReasons:
+        "{summary} Failure reasons: {reasons}.",
       retranslateUndoAction: "Undo last retranslate",
       retranslateUndoRunning: "Undoing…",
       retranslateUndoDone: "Undid {n} retranslated item(s).",
@@ -999,12 +1023,14 @@ export const en: Messages = {
       sub: "Choose the folder containing one glossary XLSX and reference TXT files. The reviewed XLSX is written back into the same folder.",
       inputFolder: "Input folder",
       glossaryFile: "Glossary XLSX",
-      glossaryFileHelp: "When the folder contains multiple XLSX files, choose the source glossary to review.",
+      glossaryFileHelp:
+        "When the folder contains multiple XLSX files, choose the source glossary to review.",
       glossaryFilePlaceholder: "Choose a glossary",
       referenceFiles: "Reference TXT",
       referenceFilesHelp:
         "Multiple files can be selected. The selected TXT files are merged as novel context for the model.",
-      referenceFilesEmpty: "No TXT reference files are available in this folder.",
+      referenceFilesEmpty:
+        "No TXT reference files are available in this folder.",
       inputScanLoading: "Scanning input folder...",
       inputScanError: "Failed to scan input folder: {reason}",
       outputFilename: "Final filename",

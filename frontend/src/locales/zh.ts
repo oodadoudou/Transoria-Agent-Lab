@@ -243,7 +243,8 @@ export const zh: Messages = {
     cachePurgeAll: "全部清除",
     cachePurgeAllHint: "删除所有任务缓存（包括最近的）。",
     cachePurgeCompleted: "只清已完成任务",
-    cachePurgeCompletedHint: "保留失败、停止和未跑完的任务，方便继续排查或恢复。",
+    cachePurgeCompletedHint:
+      "保留失败、停止和未跑完的任务，方便继续排查或恢复。",
     cachePurgeMonth: "清除一个月之前",
     cachePurgeMonthHint: "保留最近 30 天内的任务。",
     cachePurgeWeek: "清除一周之前",
@@ -315,7 +316,8 @@ export const zh: Messages = {
     outputFolder: "输出文件夹",
     rulesLabel: "规则",
     importRules: "导入 TXT / RED 规则",
-    noRules: "尚未导入规则。请导入包含 `原文->新文` 条目的 TXT 文件，或 Reeden 阅读器 .red 替换规则文件。",
+    noRules:
+      "尚未导入规则。请导入包含 `原文->新文` 条目的 TXT 文件，或 Reeden 阅读器 .red 替换规则文件。",
     execute: "执行",
     stop: "停止",
     progressLabel: "进度",
@@ -483,7 +485,8 @@ export const zh: Messages = {
     apply: "保存 EPUB",
     openOutput: "打开输出",
     dialogTitle: "编辑 EPUB 元数据",
-    dialogSub: "确认后会按书名生成 EPUB 文件名；输出文件夹为空时使用输入 EPUB 同目录。",
+    dialogSub:
+      "确认后会按书名生成 EPUB 文件名；输出文件夹为空时使用输入 EPUB 同目录。",
     cancel: "取消",
     ok: "OK",
     coverPlaceholder: "留空则沿用源 EPUB 封面",
@@ -576,7 +579,8 @@ export const zh: Messages = {
     noPrompt: "未选择 Prompt",
     modelNotConfigured: "未配置 API key",
     chatTitle: "聊天",
-    chatSub: "你可以让 Agent 帮你设计模型和 Prompt 组合。它会先生成可审查草案。",
+    chatSub:
+      "你可以让 Agent 帮你设计模型和 Prompt 组合。它会先生成可审查草案。",
     inputPlaceholder:
       "例如：帮我新建一套偏文学化的翻译 Prompt，并把术语提取用更便宜的模型。",
     send: "发送",
@@ -587,7 +591,8 @@ export const zh: Messages = {
     discardDraft: "丢弃",
     noDraft: "暂无待确认草案。",
     inventoryTitle: "可用模型",
-    inventorySub: "并发和限速仍然沿用模型配置；Agent 不会重新实现任务并行逻辑。",
+    inventorySub:
+      "并发和限速仍然沿用模型配置；Agent 不会重新实现任务并行逻辑。",
     concurrency: "并发",
     rpm: "RPM",
     tpm: "TPM",
@@ -600,6 +605,16 @@ export const zh: Messages = {
     memoryTitle: "记忆",
     memorySub: "已确认的轻量偏好。不会保存 API key 或临时任务状态。",
     memoryEmpty: "暂无已确认记忆。",
+    memoryAdd: "添加",
+    memoryAddPlaceholder: "添加一条稳定偏好，例如：人名保持一致。",
+    editMemory: "编辑",
+    deleteMemory: "删除",
+    conversationsTitle: "对话",
+    conversationsSub: "每个对话独立保存消息与草案；配置和记忆在工作区内共享。",
+    newConversation: "新建对话",
+    untitledConversation: "未命名对话",
+    renameConversation: "重命名",
+    deleteConversation: "删除",
   },
   translation: {
     crumb: "翻译",
@@ -878,7 +893,8 @@ export const zh: Messages = {
       retranslateUndoAction: "撤回上次重翻",
       retranslateUndoRunning: "撤回中…",
       retranslateUndoDone: "已撤回 {n} 条重翻结果。",
-      retranslateSaveDirtyFirst: "当前选中译文有未保存修改，请先保存再批量重翻。",
+      retranslateSaveDirtyFirst:
+        "当前选中译文有未保存修改，请先保存再批量重翻。",
       retranslateFailed: "重翻失败：{reason}",
       retranslateStale: "您已手动修改，本次重翻结果已丢弃。",
       retranslateTimeout: "重翻超时，可稍后再试。",
@@ -981,8 +997,7 @@ export const zh: Messages = {
       glossaryFileHelp: "当文件夹内有多个 XLSX 时，请选择要审查的原始术语表。",
       glossaryFilePlaceholder: "请选择术语表",
       referenceFiles: "参考 TXT",
-      referenceFilesHelp:
-        "可多选。模型会把选中的 TXT 合并为小说参考上下文。",
+      referenceFilesHelp: "可多选。模型会把选中的 TXT 合并为小说参考上下文。",
       referenceFilesEmpty: "当前文件夹没有可用 TXT 参考文件。",
       inputScanLoading: "正在扫描输入文件夹…",
       inputScanError: "扫描输入文件夹失败：{reason}",
@@ -993,11 +1008,9 @@ export const zh: Messages = {
       novelBackgroundHelp:
         "可选。补充世界观、人名规则或题材信息，帮助模型判断术语是否合理。",
       reviewRounds: "审查轮数",
-      reviewRoundsHelp:
-        "多轮会基于上一轮修改后的术语表继续审查。默认 1。",
+      reviewRoundsHelp: "多轮会基于上一轮修改后的术语表继续审查。默认 1。",
       batchSize: "每批术语数",
-      batchSizeHelp:
-        "每个模型请求包含多少条术语。较小更稳，较大更省请求数。",
+      batchSizeHelp: "每个模型请求包含多少条术语。较小更稳，较大更省请求数。",
       retryAttempts: "重试次数",
       retryAttemptsHelp:
         "瞬时网络错误、限速或超时时，每批最多额外重试几次。等待时间会递增；设为 0 则只使用模型配置里的重试次数。",

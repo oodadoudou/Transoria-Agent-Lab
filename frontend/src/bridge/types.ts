@@ -85,12 +85,22 @@ export interface AgentActionDraft {
   created_at: string;
 }
 
+export interface AgentConversationSummary {
+  id: string;
+  title: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AgentWorkspace {
   workflow_model_id: string | null;
   stage_model_ids: Record<AgentModelSlot, string | null>;
   stage_prompt_ids: Record<AgentPromptSlot, string | null>;
-  messages: AgentMessage[];
   memories: string[];
+  active_conversation_id: string | null;
+  conversations: AgentConversationSummary[];
+  messages: AgentMessage[];
   pending_draft: AgentActionDraft | null;
   draft_history: AgentActionDraft[];
   updated_at: string;

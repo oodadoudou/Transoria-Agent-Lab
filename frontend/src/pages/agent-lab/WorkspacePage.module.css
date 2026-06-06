@@ -193,10 +193,126 @@
 
 .memoryList {
   margin: 0;
-  padding-left: 18px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   color: var(--ink);
   font-size: 13px;
   line-height: 1.6;
+}
+
+.memoryItem {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel);
+}
+
+.memoryText {
+  flex: 1;
+  word-break: break-word;
+}
+
+.memoryActions,
+.convActions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.memoryAdd {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.linkButton {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent, #5b6cff);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.linkButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.inlineInput {
+  width: 100%;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  min-height: 34px;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.convList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.convItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel);
+}
+
+.convActive {
+  border-color: var(--accent, #5b6cff);
+  background: var(--panel-soft);
+}
+
+.convTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  color: var(--ink);
+  cursor: pointer;
+  width: 100%;
+}
+
+.convTitle:disabled {
+  cursor: default;
+}
+
+.convName {
+  font-size: 13px;
+  font-weight: 650;
+  word-break: break-word;
+}
+
+.convMeta {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 11px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  padding: 1px 7px;
 }
 
 .profile {

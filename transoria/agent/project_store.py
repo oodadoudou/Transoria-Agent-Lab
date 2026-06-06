@@ -37,7 +37,7 @@ class AgentProjectStore:
                 f"Agent workspace must contain a JSON object: {self.workspace_path}"
             )
         state = AgentWorkspaceState.from_dict(payload)
-        if not state.messages:
+        if not state.conversations:
             return AgentWorkspaceState.empty()
         return state
 

@@ -116,7 +116,12 @@ export const dialogsBridge = {
     return nativeDialogs.chooseFile(initialPath, ["epub"]);
   },
   chooseImageFile(initialPath?: string): Promise<DialogPathResult> {
-    return nativeDialogs.chooseFile(initialPath, ["jpg", "jpeg", "png", "webp"]);
+    return nativeDialogs.chooseFile(initialPath, [
+      "jpg",
+      "jpeg",
+      "png",
+      "webp",
+    ]);
   },
   chooseSavePath(
     defaultFilename: string,
@@ -258,7 +263,10 @@ export const agentBridge = {
   },
   updateWorkspace(
     patch: Partial<
-      Pick<AgentWorkspace, "workflow_model_id" | "stage_model_ids" | "stage_prompt_ids">
+      Pick<
+        AgentWorkspace,
+        "workflow_model_id" | "stage_model_ids" | "stage_prompt_ids"
+      >
     >,
   ): Promise<AgentWorkspaceResponse> {
     return call("agent.update_workspace", { patch });
@@ -271,6 +279,34 @@ export const agentBridge = {
   },
   discardDraft(draftId: string): Promise<AgentWorkspaceResponse> {
     return call("agent.discard_draft", { draft_id: draftId });
+  },
+  createConversation(title?: string): Promise<AgentWorkspaceResponse> {
+    return call("agent.create_conversation", title ? { title } : {});
+  },
+  switchConversation(conversationId: string): Promise<AgentWorkspaceResponse> {
+    return call("agent.switch_conversation", {
+      conversation_id: conversationId,
+    });
+  },
+  renameConversation(
+    conversationId: string,
+    title: string,
+  ): Promise<AgentWorkspaceResponse> {
+    return call("agent.rename_conversation", {
+      conversation_id: conversationId,
+      title,
+    });
+  },
+  deleteConversation(conversationId: string): Promise<AgentWorkspaceResponse> {
+    return call("agent.delete_conversation", {
+      conversation_id: conversationId,
+    });
+  },
+  updateMemory(memories: string[]): Promise<AgentWorkspaceResponse> {
+    return call("agent.update_memory", { memories });
+  },
+  deleteMemory(memory: string): Promise<AgentWorkspaceResponse> {
+    return call("agent.delete_memory", { memory });
   },
 };
 
@@ -351,7 +387,10 @@ export const proofreadingBridge = {
       dst,
     });
   },
-  regenerateOutputs(taskId: string, bilingual = false): Promise<{
+  regenerateOutputs(
+    taskId: string,
+    bilingual = false,
+  ): Promise<{
     task_id: string;
     translated_files: string[];
     bilingual_files: string[];
@@ -751,10 +790,7 @@ export const epubCompressBridge = {
 };
 
 export const epubMergeBridge = {
-  preview(
-    inputDir: string,
-    options: EpubMergeOptions,
-  ): Promise<EpubMergePlan> {
+  preview(inputDir: string, options: EpubMergeOptions): Promise<EpubMergePlan> {
     return call("epub_merge.preview", {
       input_dir: inputDir,
       options,

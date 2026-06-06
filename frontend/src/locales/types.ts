@@ -369,6 +369,16 @@ export interface Messages {
     memoryTitle: string;
     memorySub: string;
     memoryEmpty: string;
+    memoryAdd: string;
+    memoryAddPlaceholder: string;
+    editMemory: string;
+    deleteMemory: string;
+    conversationsTitle: string;
+    conversationsSub: string;
+    newConversation: string;
+    untitledConversation: string;
+    renameConversation: string;
+    deleteConversation: string;
   };
   translation: {
     crumb: string;
@@ -798,10 +808,10 @@ export interface Messages {
         originalDst: string;
         suggestedDst: string;
         originalInfo: string;
-          suggestedInfo: string;
-          reason: string;
-          actions: string;
-        };
+        suggestedInfo: string;
+        reason: string;
+        actions: string;
+      };
       restoreDelete: string;
       restoring: string;
       restored: string;

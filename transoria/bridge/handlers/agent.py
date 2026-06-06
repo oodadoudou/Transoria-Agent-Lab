@@ -17,9 +17,9 @@ from transoria.agent.schemas import (
     MODEL_SLOTS,
     PROMPT_SLOTS,
     AgentActionDraft,
+    AgentConversation,
     AgentMessage,
     AgentWorkspaceState,
-    with_updates,
 )
 from transoria.bridge.errors import BridgeError
 from transoria.bridge.handlers._utils import expect_string
@@ -36,6 +36,9 @@ _PROMPT_KIND_BY_SLOT = {
     "term_review": PromptKind.GLOSSARY_REVIEW,
 }
 
+_MAX_TITLE_LENGTH = 120
+_MAX_CONTEXT_MESSAGES = 20
+
 
 def _build_handlers(
     *,
@@ -44,8 +47,11 @@ def _build_handlers(
     profile_store: ModelProfileStore,
     llm_client_factory: LlmClientFactory,
 ) -> dict[str, object]:
+    def respond(state: AgentWorkspaceState) -> dict[str, object]:
+        return _workspace_response(state, profile_store, cache_root)
+
     def read_workspace(_payload: Mapping[str, object]) -> dict[str, object]:
-        return _workspace_response(project_store.load(), profile_store, cache_root)
+        return respond(project_store.load())
 
     def update_workspace(payload: Mapping[str, object]) -> dict[str, object]:
         patch = payload.get("patch")
@@ -62,7 +68,7 @@ def _build_handlers(
                 cache_root=cache_root,
             )
         )
-        return _workspace_response(state, profile_store, cache_root)
+        return respond(state)
 
     def send_message(payload: Mapping[str, object]) -> dict[str, object]:
         content = expect_string(payload, "message").strip()
@@ -79,11 +85,13 @@ def _build_handlers(
             )
 
         current = project_store.load()
-        user_message = AgentMessage.create("user", content)
-        state_with_user = with_updates(
-            current,
-            messages=_trim_messages((*current.messages, user_message)),
+        conversation = _require_active(current)
+        conversation = conversation.append_message(
+            AgentMessage.create("user", content)
         )
+        if not conversation.title:
+            conversation = conversation.with_title(_derive_title(content))
+        state_with_user = current.with_active(conversation)
 
         reply, draft = _generate_reply(
             state_with_user,
@@ -92,21 +100,20 @@ def _build_handlers(
             cache_root=cache_root,
             llm_client_factory=llm_client_factory,
         )
-        assistant_message = AgentMessage.create("assistant", reply)
-        final_state = with_updates(
-            state_with_user,
-            messages=_trim_messages((*state_with_user.messages, assistant_message)),
-            pending_draft=draft
-            if draft is not None
-            else state_with_user.pending_draft,
+        conversation = conversation.append_message(
+            AgentMessage.create("assistant", reply)
         )
+        if draft is not None:
+            conversation = conversation.with_pending_draft(draft)
+        final_state = state_with_user.with_active(conversation)
         project_store.save(final_state)
-        return _workspace_response(final_state, profile_store, cache_root)
+        return respond(final_state)
 
     def apply_draft(payload: Mapping[str, object]) -> dict[str, object]:
         draft_id = expect_string(payload, "draft_id")
         current = project_store.load()
-        draft = current.pending_draft
+        conversation = _require_active(current)
+        draft = conversation.pending_draft
         if draft is None or draft.id != draft_id or draft.status != "pending":
             raise BridgeError.not_found(
                 f"pending draft {draft_id!r} does not exist.",
@@ -118,40 +125,111 @@ def _build_handlers(
             profile_store=profile_store,
             cache_root=cache_root,
         )
-        applied_draft = draft.with_status("applied")
-        message = AgentMessage.create(
-            "assistant",
-            f"Applied draft: {draft.title}",
+        conversation = _require_active(applied_state)
+        conversation = conversation.archive_pending("applied")
+        conversation = conversation.append_message(
+            AgentMessage.create("assistant", f"Applied draft: {draft.title}")
         )
-        final_state = with_updates(
-            applied_state,
-            messages=_trim_messages((*applied_state.messages, message)),
-            pending_draft=None,
-            draft_history=(*applied_state.draft_history, applied_draft),
-        )
+        final_state = applied_state.with_active(conversation)
         project_store.save(final_state)
-        return {
-            **_workspace_response(final_state, profile_store, cache_root),
-            "result": result,
-        }
+        return {**respond(final_state), "result": result}
 
     def discard_draft(payload: Mapping[str, object]) -> dict[str, object]:
         draft_id = expect_string(payload, "draft_id")
         current = project_store.load()
-        draft = current.pending_draft
+        conversation = _require_active(current)
+        draft = conversation.pending_draft
         if draft is None or draft.id != draft_id or draft.status != "pending":
             raise BridgeError.not_found(
                 f"pending draft {draft_id!r} does not exist.",
                 details={"draft_id": draft_id},
             )
-        discarded = draft.with_status("discarded")
-        final_state = with_updates(
-            current,
-            pending_draft=None,
-            draft_history=(*current.draft_history, discarded),
-        )
+        conversation = conversation.archive_pending("discarded")
+        final_state = current.with_active(conversation)
         project_store.save(final_state)
-        return _workspace_response(final_state, profile_store, cache_root)
+        return respond(final_state)
+
+    def create_conversation(payload: Mapping[str, object]) -> dict[str, object]:
+        raw_title = payload.get("title")
+        title = raw_title.strip() if isinstance(raw_title, str) else ""
+        if len(title) > _MAX_TITLE_LENGTH:
+            raise BridgeError.invalid_argument(
+                "title is too long.",
+                field="title",
+                details={"max_length": _MAX_TITLE_LENGTH},
+            )
+        conversation = AgentConversation.seeded()
+        if title:
+            conversation = conversation.with_title(title)
+        state = project_store.update(
+            lambda current: current.add_conversation(conversation)
+        )
+        return respond(state)
+
+    def switch_conversation(payload: Mapping[str, object]) -> dict[str, object]:
+        conversation_id = expect_string(payload, "conversation_id")
+        current = project_store.load()
+        if all(conv.id != conversation_id for conv in current.conversations):
+            raise BridgeError.not_found(
+                f"conversation {conversation_id!r} does not exist.",
+                details={"conversation_id": conversation_id},
+            )
+        state = project_store.save(current.set_active(conversation_id))
+        return respond(state)
+
+    def rename_conversation(payload: Mapping[str, object]) -> dict[str, object]:
+        conversation_id = expect_string(payload, "conversation_id")
+        title = expect_string(payload, "title").strip()
+        if not title:
+            raise BridgeError.invalid_argument("title must not be empty.", field="title")
+        if len(title) > _MAX_TITLE_LENGTH:
+            raise BridgeError.invalid_argument(
+                "title is too long.",
+                field="title",
+                details={"max_length": _MAX_TITLE_LENGTH},
+            )
+        current = project_store.load()
+        target = next(
+            (conv for conv in current.conversations if conv.id == conversation_id),
+            None,
+        )
+        if target is None:
+            raise BridgeError.not_found(
+                f"conversation {conversation_id!r} does not exist.",
+                details={"conversation_id": conversation_id},
+            )
+        state = project_store.save(
+            current.replace_conversation(target.with_title(title))
+        )
+        return respond(state)
+
+    def delete_conversation(payload: Mapping[str, object]) -> dict[str, object]:
+        conversation_id = expect_string(payload, "conversation_id")
+        current = project_store.load()
+        if all(conv.id != conversation_id for conv in current.conversations):
+            raise BridgeError.not_found(
+                f"conversation {conversation_id!r} does not exist.",
+                details={"conversation_id": conversation_id},
+            )
+        next_state = current.remove_conversation(conversation_id)
+        if not next_state.conversations:
+            next_state = next_state.add_conversation(AgentConversation.seeded())
+        state = project_store.save(next_state)
+        return respond(state)
+
+    def update_memory(payload: Mapping[str, object]) -> dict[str, object]:
+        memories = _coerce_memories_payload(payload)
+        state = project_store.update(lambda current: current.with_memories(memories))
+        return respond(state)
+
+    def delete_memory(payload: Mapping[str, object]) -> dict[str, object]:
+        memory = expect_string(payload, "memory").strip()
+        state = project_store.update(
+            lambda current: current.with_memories(
+                tuple(item for item in current.memories if item != memory)
+            )
+        )
+        return respond(state)
 
     return {
         "agent.read_workspace": read_workspace,
@@ -159,6 +237,12 @@ def _build_handlers(
         "agent.send_message": send_message,
         "agent.apply_draft": apply_draft,
         "agent.discard_draft": discard_draft,
+        "agent.create_conversation": create_conversation,
+        "agent.switch_conversation": switch_conversation,
+        "agent.rename_conversation": rename_conversation,
+        "agent.delete_conversation": delete_conversation,
+        "agent.update_memory": update_memory,
+        "agent.delete_memory": delete_memory,
     }
 
 
@@ -191,7 +275,7 @@ def _generate_reply(
     prompt = build_user_prompt(
         user_message=user_message,
         inventory=inventory,
-        current_state=_workspace_dict(state),
+        current_state=_llm_context(state),
     )
     request = ChatRequest(
         model=profile,
@@ -215,7 +299,10 @@ def _generate_reply(
         )
     reply, draft = parse_agent_response(response.content)
     if draft is not None:
-        _validate_draft(draft, profile_store=profile_store, cache_root=cache_root)
+        try:
+            _validate_draft(draft, profile_store=profile_store, cache_root=cache_root)
+        except BridgeError as exc:
+            return (f"{reply}\n\n（已忽略无法应用的草案：{exc}）".strip(), None)
     return reply, draft
 
 
@@ -246,8 +333,7 @@ def _apply_workspace_patch(
         stage_prompt_ids.update(
             _coerce_prompt_slots(patch.get("stage_prompt_ids"), cache_root=cache_root)
         )
-    return with_updates(
-        state,
+    return state.with_config(
         workflow_model_id=workflow_model_id,
         stage_model_ids=stage_model_ids,
         stage_prompt_ids=stage_prompt_ids,
@@ -278,7 +364,7 @@ def _apply_draft(
         }
     if draft.kind == "update_memory":
         memories = _coerce_memories_payload(draft.payload)
-        next_state = with_updates(state, memories=memories)
+        next_state = state.with_memories(memories)
         return next_state, {"kind": draft.kind, "memory_count": len(memories)}
     raise BridgeError.invalid_argument(
         f"unsupported draft kind: {draft.kind!r}",
@@ -481,19 +567,76 @@ def _optional_str(value: object) -> str | None:
     raise BridgeError.invalid_argument("value must be a string or null.")
 
 
+def _require_active(state: AgentWorkspaceState) -> AgentConversation:
+    conversation = state.active()
+    if conversation is None:
+        raise BridgeError.not_found("no active conversation exists.")
+    return conversation
+
+
+def _derive_title(content: str) -> str:
+    flat = " ".join(content.split())
+    return flat[:40]
+
+
 def _workspace_response(
     state: AgentWorkspaceState,
     profile_store: ModelProfileStore,
     cache_root: Path,
 ) -> dict[str, object]:
     return {
-        "workspace": _workspace_dict(state),
+        "workspace": _workspace_wire(state),
         "inventory": _inventory(profile_store, cache_root),
     }
 
 
-def _workspace_dict(state: AgentWorkspaceState) -> dict[str, object]:
-    return state.to_dict()
+def _workspace_wire(state: AgentWorkspaceState) -> dict[str, object]:
+    """Wire shape: workspace config plus the active conversation hoisted flat."""
+    active = state.active()
+    return {
+        "workflow_model_id": state.workflow_model_id,
+        "stage_model_ids": dict(state.stage_model_ids),
+        "stage_prompt_ids": dict(state.stage_prompt_ids),
+        "memories": list(state.memories),
+        "active_conversation_id": state.active_conversation_id,
+        "conversations": [
+            _conversation_summary(conversation) for conversation in state.conversations
+        ],
+        "messages": [message.to_dict() for message in active.messages]
+        if active
+        else [],
+        "pending_draft": active.pending_draft.to_dict()
+        if active and active.pending_draft
+        else None,
+        "draft_history": [draft.to_dict() for draft in active.draft_history]
+        if active
+        else [],
+        "updated_at": state.updated_at,
+    }
+
+
+def _conversation_summary(conversation: AgentConversation) -> dict[str, object]:
+    return {
+        "id": conversation.id,
+        "title": conversation.title,
+        "message_count": len(conversation.messages),
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+    }
+
+
+def _llm_context(state: AgentWorkspaceState) -> dict[str, object]:
+    active = state.active()
+    recent = active.messages[-_MAX_CONTEXT_MESSAGES:] if active else ()
+    return {
+        "workflow_model_id": state.workflow_model_id,
+        "stage_model_ids": dict(state.stage_model_ids),
+        "stage_prompt_ids": dict(state.stage_prompt_ids),
+        "memories": list(state.memories),
+        "recent_messages": [
+            {"role": message.role, "content": message.content} for message in recent
+        ],
+    }
 
 
 def _inventory(profile_store: ModelProfileStore, cache_root: Path) -> dict[str, object]:
@@ -566,10 +709,6 @@ def _generate_prompt_id(
         candidate = f"agent-{kind.value}-{slug}-{token_hex(3)}"
         if candidate not in existing_ids:
             return candidate
-
-
-def _trim_messages(messages: tuple[AgentMessage, ...]) -> tuple[AgentMessage, ...]:
-    return messages[-80:]
 
 
 def register(
