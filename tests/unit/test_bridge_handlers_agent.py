@@ -1102,6 +1102,11 @@ def test_agent_start_translation_draft_applies_with_task_lock(
         "started_at": "2026-01-01T00:00:00+00:00",
     }
     assert applied["result"]["task"]["kind"] == "translation"
+    final_message = workspace["messages"][-1]["content"]
+    assert "已启动翻译任务" in final_message
+    assert "任务 ID：translation-agent-1" in final_message
+    assert "当前进度阶段：正在运行" in final_message
+    assert "翻译 dashboard" in final_message
     assert captured["draft_kind"] == "start_translation_task"
     payload = captured["payload"]
     assert isinstance(payload, dict)
@@ -1149,12 +1154,147 @@ def test_agent_directly_drafts_glossary_extraction_from_chat_inputs(
     assert fake.requests == []
     draft = response["workspace"]["pending_draft"]
     assert draft["kind"] == "start_glossary_task"
-    assert draft["payload"]["input_dir"] == str(source_dir)
-    assert draft["payload"]["output_dir"] == str(source_dir)
+    assert draft["payload"]["input_dir"].rstrip("/") == str(source_dir)
+    assert draft["payload"]["output_dir"].rstrip("/") == str(source_dir)
     assert draft["payload"]["source_language"] == "kr"
     assert draft["payload"]["target_language"] == "zh"
     assert draft["payload"]["novel_background"] == "韩式现代奇幻，人物关系复杂"
     assert "默认输出到 input 目录" in response["workspace"]["messages"][-1]["content"]
+
+
+def test_agent_new_glossary_request_discards_stale_model_copy_draft(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    stale = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "按照 DeepSeek flash 的配置复制一个新模型配置，"
+                "模型名字叫做 DeepSeek-P。"
+            )
+        },
+    )["workspace"]["pending_draft"]
+    assert stale["kind"] == "create_model_profile"
+
+    response = router.call("agent.send_message", {"message": "提取术语"})
+
+    workspace = response["workspace"]
+    assert workspace["pending_draft"] is None
+    assert workspace["draft_history"][-1]["id"] == stale["id"]
+    assert workspace["draft_history"][-1]["status"] == "discarded"
+    assert "请提供 input 目录" in workspace["messages"][-1]["content"]
+
+
+def test_agent_glossary_continuation_replaces_model_copy_context(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    source_dir = tmp_path / "source copy"
+    source_dir.mkdir()
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+    router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "按照 DeepSeek flash 的配置复制一个新模型配置，"
+                "模型名字叫做 DeepSeek-P。"
+            )
+        },
+    )
+    router.call("agent.send_message", {"message": "提取术语"})
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"{source_dir}/\n"
+                "输出和输入放在同一个文件夹里。BL 作品指南\n\n"
+                "背景/类型：现代\n\n"
+                "作品关键词：严肃、爱恨交织、禁忌关系\n\n"
+                "人物介绍\n攻：李承元"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_glossary_task"
+    assert draft["payload"]["input_dir"].rstrip("/") == str(source_dir)
+    assert draft["payload"]["output_dir"].rstrip("/") == str(source_dir)
+    assert draft["payload"]["novel_background"] == "现代"
+    assert draft["payload"]["source_language"] == "kr"
+    assert "启动术语提取" in draft["title"]
+
+
+def test_agent_drafts_glossary_from_directory_and_background_without_llm(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    source_dir = tmp_path / "keyword-source"
+    source_dir.mkdir()
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"{source_dir}\n"
+                "输出和输入放在同一个文件夹里。\n\n"
+                "背景/类型：现代 BL，严肃，爱恨交织。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_glossary_task"
+    assert draft["payload"]["input_dir"] == str(source_dir)
+    assert draft["payload"]["output_dir"] == str(source_dir)
+    assert draft["payload"]["novel_background"] == "现代 BL，严肃，爱恨交织"
 
 
 def test_agent_glossary_extraction_requires_background(
@@ -1287,6 +1427,10 @@ def test_agent_compound_draft_can_fill_recipe_and_start_translation(
         "update_workspace",
         "start_translation_task",
     ]
+    final_message = workspace["messages"][-1]["content"]
+    assert "已启动翻译任务" in final_message
+    assert "任务 ID：translation-agent-compound" in final_message
+    assert "翻译 dashboard" in final_message
     settings = default_store(tmp_path).load_all()
     assert settings.translation.input_folder == ""
     assert settings.translation.output_folder == ""
@@ -2137,6 +2281,40 @@ def test_agent_model_profile_copy_asks_only_for_missing_provider_model_id(
     assert "确认 base_url" not in content
 
 
+def test_agent_model_profile_placeholder_model_id_draft_is_dropped(
+    tmp_path: Path,
+) -> None:
+    router, _ = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "我准备了模型配置草案。",
+          "draft": {
+            "kind": "create_model_profile",
+            "title": "复制模型配置为 DeepSeek 4 Pro",
+            "summary": "基于 DeepSeek 4 Pro 创建新模型配置。",
+            "payload": {
+              "profile": {
+                "id": "deepseek-4-pro",
+                "display_name": "DeepSeek 4 Pro",
+                "provider_format": "openai",
+                "base_url": "https://api.deepseek.com/v1",
+                "model_id": "新的值（例如",
+                "concurrency_limit": 4
+              }
+            }
+          }
+        }
+        """,
+    )
+
+    response = router.call("agent.send_message", {"message": "创建 DeepSeek Pro 模型"})
+
+    assert response["workspace"]["pending_draft"] is None
+    assert "已忽略无法应用的草案" in response["workspace"]["messages"][-1]["content"]
+    assert ModelProfileStore.from_cache_root(tmp_path).get("deepseek-4-pro") is None
+
+
 def test_agent_update_model_profile_draft_can_rotate_keys_with_masked_preview(
     tmp_path: Path,
 ) -> None:
@@ -2652,6 +2830,36 @@ def test_inventory_reports_api_key_state_and_prompt_groups(tmp_path: Path) -> No
     assert by_id["with-key"]["api_key_configured"] is True
     assert by_id["without-key"]["api_key_configured"] is False
     assert set(inventory["prompts"]) == {"translation", "glossary", "glossary_review"}
+
+
+def test_agent_inventory_excludes_placeholder_model_profiles(tmp_path: Path) -> None:
+    store = ModelProfileStore.from_cache_root(tmp_path)
+    store.create(
+        ModelConfig(
+            id="valid-profile",
+            display_name="Valid",
+            provider_format=ProviderFormat.OPENAI,
+            base_url="https://example.com/v1",
+            model_id="valid-model",
+            api_keys=("k",),
+        )
+    )
+    store.create(
+        ModelConfig(
+            id="bad-profile",
+            display_name="DeepSeek 4 Pro",
+            provider_format=ProviderFormat.OPENAI,
+            base_url="https://example.com/v1",
+            model_id="新的值（例如",
+            api_keys=("k",),
+        )
+    )
+    router = build_default_router(cache_root=tmp_path)
+
+    inventory = router.call("agent.read_workspace", {})["inventory"]
+
+    assert [profile["id"] for profile in inventory["profiles"]] == ["valid-profile"]
+    assert inventory["excluded_profile_count"] == 1
 
 
 # --- Conversation create/rename validation ----------------------------------

@@ -231,6 +231,7 @@ def _build_handlers(
 
         current = _load_with_reconciled_active_task(project_store, task_service)
         conversation = _require_active(current)
+        previous_pending = conversation.pending_draft
         conversation = conversation.append_message(
             AgentMessage.create("user", content)
         )
@@ -250,6 +251,13 @@ def _build_handlers(
         conversation = conversation.append_message(
             AgentMessage.create("assistant", reply)
         )
+        if previous_pending is not None and (
+            draft is not None or _should_discard_pending_for_new_message(content)
+        ):
+            conversation = conversation.archive_pending(
+                "discarded",
+                payload=_sanitize_draft_payload(previous_pending),
+            )
         if draft is not None:
             conversation = conversation.with_pending_draft(draft)
         final_state = state_with_user.with_active(conversation)
@@ -280,7 +288,14 @@ def _build_handlers(
             payload=_sanitize_draft_payload(draft),
         )
         conversation = conversation.append_message(
-            AgentMessage.create("assistant", f"Applied draft: {draft.title}")
+            AgentMessage.create(
+                "assistant",
+                _applied_draft_message(
+                    draft,
+                    result,
+                    task_service=task_service,
+                ),
+            )
         )
         final_state = applied_state.with_active(conversation)
         project_store.save(final_state)
@@ -594,6 +609,7 @@ def _generate_reply(
     if not user_message.startswith("The user clicked Adjust on the current pending draft."):
         direct = _direct_glossary_extraction_response(
             user_message=user_message,
+            conversation_context=conversation_context,
             state=state,
             current_state=current_state,
         )
@@ -908,12 +924,18 @@ def _direct_model_profile_copy_response(
     context_text = "\n".join(
         str(item.get("content") or "") for item in conversation_context
     )
-    combined_text = "\n".join((context_text, user_message))
-    if not _looks_like_model_profile_copy_request(combined_text):
+    current_request = _looks_like_model_profile_copy_request(user_message)
+    contextual_confirmation = (
+        _looks_like_model_profile_copy_request(context_text)
+        and _looks_like_model_profile_copy_continuation(user_message)
+    )
+    if not current_request and not contextual_confirmation:
         return None
+    combined_text = "\n".join((context_text, user_message))
+    request_text = combined_text if contextual_confirmation else user_message
 
     source = _resolve_model_profile_from_copy_request(
-        combined_text,
+        request_text,
         profile_store=profile_store,
     )
     if source is None:
@@ -924,7 +946,7 @@ def _direct_model_profile_copy_response(
 
     display_name = _extract_model_copy_display_name(user_message)
     if not display_name:
-        display_name = _extract_model_copy_display_name(combined_text)
+        display_name = _extract_model_copy_display_name(request_text)
     if not display_name:
         return (
             f"我可以基于 {source.display_name} 复制创建新模型配置。请明确新配置的显示名称。",
@@ -933,7 +955,7 @@ def _direct_model_profile_copy_response(
 
     provider_model_id = _extract_provider_model_id_override(user_message)
     if provider_model_id is None:
-        provider_model_id = _extract_provider_model_id_override(combined_text)
+        provider_model_id = _extract_provider_model_id_override(request_text)
     if _requests_different_provider_model_id(user_message) and not provider_model_id:
         return (
             (
@@ -976,18 +998,42 @@ def _direct_model_profile_copy_response(
 def _direct_glossary_extraction_response(
     *,
     user_message: str,
+    conversation_context: list[Mapping[str, object]],
     state: AgentWorkspaceState,
     current_state: Mapping[str, object],
 ) -> tuple[str, AgentActionDraft | None] | None:
-    if not _looks_like_glossary_extraction_request(user_message):
+    context_text = "\n".join(
+        str(item.get("content") or "") for item in conversation_context
+    )
+    current_request = _looks_like_glossary_extraction_request(user_message)
+    implicit_current_request = _looks_like_glossary_extraction_continuation(
+        user_message
+    ) and not _looks_like_model_profile_copy_request(user_message)
+    contextual_continuation = (
+        _looks_like_glossary_extraction_request(context_text)
+        and _looks_like_glossary_extraction_continuation(user_message)
+    )
+    if (
+        not current_request
+        and not contextual_continuation
+        and not implicit_current_request
+    ):
         return None
+    combined_text = "\n".join((context_text, user_message))
+    extraction_text = combined_text if contextual_continuation else user_message
     input_dir, output_dir, output_defaulted = _extract_glossary_task_dirs(user_message)
+    if not input_dir and contextual_continuation:
+        input_dir, output_dir, output_defaulted = _extract_glossary_task_dirs(
+            extraction_text
+        )
     if not input_dir:
         return (
             "我理解你想提取术语。请提供 input 目录；如果不提供 output 目录，我会默认使用 input 目录作为输出目录。",
             None,
         )
     novel_background = _extract_novel_background(user_message)
+    if not novel_background and contextual_continuation:
+        novel_background = _extract_novel_background(extraction_text)
     if not novel_background:
         return (
             "我理解你想提取术语。请再提供小说背景，这会进入本次任务配置，不会写入手动设置页。",
@@ -1060,6 +1106,58 @@ def _looks_like_glossary_extraction_request(text: str) -> bool:
     )
 
 
+def _looks_like_glossary_extraction_continuation(text: str) -> bool:
+    has_path = bool(_extract_absolute_path_candidates(text)) or bool(
+        re.search(r"input|output|输入|输出|目录|路径", text, flags=re.IGNORECASE)
+    )
+    has_context = any(
+        marker in text
+        for marker in (
+            "背景",
+            "类型",
+            "世界观",
+            "作品关键词",
+            "人物介绍",
+            "作品指南",
+            "小说介绍",
+        )
+    )
+    return has_path and has_context
+
+
+def _should_discard_pending_for_new_message(text: str) -> bool:
+    normalized = text.lower()
+    if _looks_like_glossary_extraction_request(text):
+        return True
+    if _looks_like_glossary_extraction_continuation(text):
+        return True
+    if _looks_like_model_profile_copy_request(text):
+        return True
+    if _looks_like_model_profile_copy_continuation(text):
+        return True
+    return any(
+        marker in normalized
+        for marker in (
+            "创建",
+            "新建",
+            "修改",
+            "更新",
+            "配置",
+            "应用",
+            "保存",
+            "启动",
+            "开始",
+            "提取",
+            "处理术语",
+            "create",
+            "update",
+            "apply",
+            "save",
+            "start",
+        )
+    )
+
+
 def _extract_glossary_task_dirs(text: str) -> tuple[str, str | None, bool]:
     input_dir = _extract_labeled_path(
         text,
@@ -1091,8 +1189,8 @@ def _extract_labeled_path(text: str, labels: tuple[str, ...]) -> str | None:
 
 def _extract_absolute_path_candidates(text: str) -> list[str]:
     candidates: list[str] = []
-    for match in re.finditer(r"/[^\n，。；;]+", text):
-        value = _trim_path_like_value(match.group(0))
+    for match in re.finditer(r"(?:^|(?<=[\s:=：]))(/[^\n，。；;]+)", text):
+        value = _trim_path_like_value(match.group(1))
         if value and value not in candidates:
             candidates.append(value)
     return candidates
@@ -1115,8 +1213,20 @@ def _trim_path_like_value(value: str) -> str:
         "。背景",
         "，背景",
         "；背景",
+        "。类型",
+        "，类型",
+        "；类型",
+        "。作品关键词",
+        "，作品关键词",
+        "；作品关键词",
+        "。人物介绍",
+        "，人物介绍",
+        "；人物介绍",
         " 小说背景",
         " 背景",
+        " 类型",
+        " 作品关键词",
+        " 人物介绍",
         "\n",
     )
     for marker in stop_markers:
@@ -1128,14 +1238,23 @@ def _trim_path_like_value(value: str) -> str:
 
 def _extract_novel_background(text: str) -> str:
     match = re.search(
-        r"(?:小说背景|作品背景|背景|世界观)\s*(?:是|为|=|:|：)?\s*(.+)",
+        r"(?:小说背景|作品背景|背景(?:/类型)?|世界观|类型)\s*(?:是|为|=|:|：)?\s*(.+)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     if match is None:
         return ""
     value = match.group(1).strip()
-    for marker in (" input", " output", " 输入", " 输出"):
+    for marker in (
+        " input",
+        " output",
+        " 输入",
+        " 输出",
+        "\n\n作品关键词",
+        "\n作品关键词",
+        "\n\n人物介绍",
+        "\n人物介绍",
+    ):
         index = value.find(marker)
         if index > 0:
             value = value[:index]
@@ -1209,6 +1328,33 @@ def _looks_like_model_profile_copy_request(text: str) -> bool:
         )
     )
     return has_model and has_copy and has_create
+
+
+def _looks_like_model_profile_copy_continuation(text: str) -> bool:
+    normalized = text.lower()
+    if len(text) > 500:
+        return False
+    has_confirmation = any(
+        marker in normalized
+        for marker in (
+            "对的",
+            "是的",
+            "可以",
+            "确认",
+            "创建一个新的",
+            "用这个",
+            "不要用相同",
+            "改为",
+            "改成",
+            "model_id",
+            "模型 id",
+            "模型id",
+            "provider format",
+            "base_url",
+            "接口模型",
+        )
+    )
+    return has_confirmation
 
 
 def _model_profile_copy_payload(
@@ -1743,6 +1889,107 @@ def _apply_draft(
         settings_store=settings_store,
         task_service=task_service,
     )
+
+
+def _applied_draft_message(
+    draft: AgentActionDraft,
+    result: Mapping[str, object],
+    *,
+    task_service: TaskService,
+) -> str:
+    task_summaries = _task_start_summaries_from_result(
+        result,
+        task_service=task_service,
+    )
+    if not task_summaries:
+        return f"已应用草案：{draft.title}"
+    if len(task_summaries) == 1:
+        summary = task_summaries[0]
+        return (
+            f"已应用草案：{draft.title}\n\n"
+            f"已启动{summary['label']}任务。\n"
+            f"任务 ID：{summary['task_id']}\n"
+            f"当前进度阶段：{summary['status']}。\n"
+            f"你可以在{summary['dashboard']}查看实时进度。任务结束前，Agent Lab 不会再启动其他任务。"
+        )
+    lines = [f"已应用草案：{draft.title}", "", "已启动以下任务："]
+    for summary in task_summaries:
+        lines.append(
+            f"- {summary['label']}：{summary['task_id']}，当前阶段：{summary['status']}，"
+            f"可在{summary['dashboard']}查看。"
+        )
+    lines.append("任务结束前，Agent Lab 不会再启动其他任务。")
+    return "\n".join(lines)
+
+
+def _task_start_summaries_from_result(
+    result: Mapping[str, object],
+    *,
+    task_service: TaskService,
+) -> list[dict[str, str]]:
+    summaries: list[dict[str, str]] = []
+    if isinstance(result.get("results"), list):
+        for item in result["results"]:  # type: ignore[index]
+            if isinstance(item, Mapping):
+                summaries.extend(
+                    _task_start_summaries_from_result(
+                        item,
+                        task_service=task_service,
+                    )
+                )
+        return summaries
+    task = result.get("task")
+    if not isinstance(task, Mapping):
+        return []
+    task_id = str(task.get("task_id") or "")
+    task_kind = str(task.get("kind") or "")
+    if not task_id or task_kind not in _AGENT_TASK_KINDS:
+        return []
+    header = _task_header_or_none(task_service, task_kind, task_id)
+    status = (
+        _task_status_label(str(header["status"]))
+        if header is not None and isinstance(header.get("status"), str)
+        else "已提交，等待任务状态刷新"
+    )
+    summaries.append(
+        {
+            "task_id": task_id,
+            "kind": task_kind,
+            "label": _task_kind_label(task_kind),
+            "dashboard": _task_dashboard_label(task_kind),
+            "status": status,
+        }
+    )
+    return summaries
+
+
+def _task_kind_label(kind: str) -> str:
+    return {
+        "translation": "翻译",
+        "glossary": "术语提取",
+        "glossary_review": "术语审查",
+    }.get(kind, kind)
+
+
+def _task_dashboard_label(kind: str) -> str:
+    return {
+        "translation": "翻译 dashboard",
+        "glossary": "术语提取 dashboard",
+        "glossary_review": "术语审查 dashboard",
+    }.get(kind, "对应 dashboard")
+
+
+def _task_status_label(status: str) -> str:
+    return {
+        "pending": "已提交，等待运行",
+        "running": "正在运行",
+        "paused": "已暂停",
+        "stopping": "正在停止",
+        "completed": "已完成",
+        "failed": "已失败",
+        "cancelled": "已取消",
+        "stopped": "已停止",
+    }.get(status, status or "已提交，等待任务状态刷新")
 
 
 def _validate_draft(
@@ -3181,6 +3428,12 @@ def _model_profile_from_draft_payload(
         body = source_body
         copied_api_keys = source.api_keys
     body.setdefault("id", _generate_model_profile_id(body))
+    for field in ("display_name", "model_id"):
+        if _looks_like_placeholder_value(body.get(field)):
+            raise BridgeError.invalid_argument(
+                f"{field} contains placeholder text.",
+                field=field,
+            )
     api_keys = body.pop("api_keys", None)
     try:
         profile = ModelConfig.from_dict(body)
@@ -3232,6 +3485,11 @@ def _coerce_model_profile_patch(patch: Mapping[str, object]) -> dict[str, object
         )
     coerced: dict[str, object] = {}
     for key, value in patch.items():
+        if key in {"display_name", "model_id"} and _looks_like_placeholder_value(value):
+            raise BridgeError.invalid_argument(
+                f"{key} contains placeholder text.",
+                field=key,
+            )
         if key == "provider_format" and isinstance(value, str):
             try:
                 coerced[key] = ProviderFormat(value)
@@ -3251,6 +3509,29 @@ def _coerce_model_profile_patch(patch: Mapping[str, object]) -> dict[str, object
         else:
             coerced[key] = value
     return coerced
+
+
+def _looks_like_placeholder_value(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "新的值",
+            "例如",
+            "比如",
+            "待填",
+            "占位",
+            "placeholder",
+            "example",
+            "your-model",
+            "model-id",
+            "<model",
+        )
+    )
 
 
 def _coerce_api_keys(value: object) -> tuple[str, ...]:
@@ -3803,26 +4084,40 @@ def _inventory(profile_store: ModelProfileStore, cache_root: Path) -> dict[str, 
         ]
     return {
         "profiles": [
-            {
-                "id": profile.id,
-                "display_name": profile.display_name,
-                "provider_format": profile.provider_format.value,
-                "base_url": profile.base_url,
-                "model_id": profile.model_id,
-                "api_key_configured": bool(profile.api_keys),
-                "thinking_level": profile.thinking_level.value,
-                "supports_thinking": profile.thinking_level is not ThinkingLevel.OFF,
-                "max_output_tokens": profile.max_output_tokens,
-                "input_token_limit": profile.input_token_limit,
-                "concurrency_limit": profile.concurrency_limit,
-                "rpm_limit": profile.rpm_limit,
-                "tpm_limit": profile.tpm_limit,
-                "retry_attempts": profile.retry_attempts,
-            }
+            _profile_inventory_summary(profile)
             for profile in profiles
+            if not _model_profile_has_placeholder_fields(profile)
         ],
+        "excluded_profile_count": sum(
+            1 for profile in profiles if _model_profile_has_placeholder_fields(profile)
+        ),
         "prompts": prompt_groups,
     }
+
+
+def _profile_inventory_summary(profile: ModelConfig) -> dict[str, object]:
+    return {
+        "id": profile.id,
+        "display_name": profile.display_name,
+        "provider_format": profile.provider_format.value,
+        "base_url": profile.base_url,
+        "model_id": profile.model_id,
+        "api_key_configured": bool(profile.api_keys),
+        "thinking_level": profile.thinking_level.value,
+        "supports_thinking": profile.thinking_level is not ThinkingLevel.OFF,
+        "max_output_tokens": profile.max_output_tokens,
+        "input_token_limit": profile.input_token_limit,
+        "concurrency_limit": profile.concurrency_limit,
+        "rpm_limit": profile.rpm_limit,
+        "tpm_limit": profile.tpm_limit,
+        "retry_attempts": profile.retry_attempts,
+    }
+
+
+def _model_profile_has_placeholder_fields(profile: ModelConfig) -> bool:
+    return _looks_like_placeholder_value(
+        profile.display_name
+    ) or _looks_like_placeholder_value(profile.model_id)
 
 
 def _prompt_summary(preset: PromptPreset) -> dict[str, object]:
