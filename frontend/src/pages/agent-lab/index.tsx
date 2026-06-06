@@ -1,7 +1,12 @@
 import type { AgentLabPage } from "@/store/useTaskStore";
-import { WorkspacePage } from "./WorkspacePage";
+import { ChatPage } from "./ChatPage";
+import { RecipesPage } from "./RecipesPage";
 
 export function AgentLabModule({ page }: { page: AgentLabPage }) {
-  if (page === "workspace") return <WorkspacePage />;
-  return <WorkspacePage />;
+  switch (page) {
+    case "chat":
+      return <ChatPage />;
+    case "recipes":
+      return <RecipesPage />;
+  }
 }

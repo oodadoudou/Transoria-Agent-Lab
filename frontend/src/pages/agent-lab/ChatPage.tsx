@@ -1,54 +1,35 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { agentBridge } from "@/bridge/client";
 import type {
   AgentInventory,
-  AgentInventoryPrompt,
   AgentModelSlot,
   AgentPromptSlot,
+  AgentRecipe,
   AgentWorkspace,
   AgentWorkspaceResponse,
-  PromptKind,
 } from "@/bridge/types";
 import { Panel } from "@/components/Panel";
 import { Pill } from "@/components/Pill";
 import { useMessages } from "@/locales";
-import styles from "./WorkspacePage.module.css";
+import { useTaskStore } from "@/store/useTaskStore";
+import styles from "./ChatPage.module.css";
 
-const MODEL_SLOTS: Array<{ slot: AgentModelSlot; labelKey: string }> = [
-  { slot: "translation", labelKey: "translationModel" },
-  { slot: "term_extract", labelKey: "termExtractModel" },
-  { slot: "term_review", labelKey: "termReviewModel" },
+const MODEL_SLOTS: ReadonlyArray<AgentModelSlot> = [
+  "translation",
+  "term_extract",
+  "term_review",
 ];
 
-const PROMPT_SLOTS: Array<{
-  slot: AgentPromptSlot;
-  labelKey: string;
-  kind: PromptKind;
-}> = [
-  { slot: "translation", labelKey: "translationPrompt", kind: "translation" },
-  { slot: "term_extract", labelKey: "termExtractPrompt", kind: "glossary" },
-  {
-    slot: "term_review",
-    labelKey: "termReviewPrompt",
-    kind: "glossary_review",
-  },
+const PROMPT_SLOTS: ReadonlyArray<AgentPromptSlot> = [
+  "translation",
+  "term_extract",
+  "term_review",
 ];
 
-const EMPTY_MODEL_SLOTS: Record<AgentModelSlot, string | null> = {
-  translation: null,
-  term_extract: null,
-  term_review: null,
-};
-
-const EMPTY_PROMPT_SLOTS: Record<AgentPromptSlot, string | null> = {
-  translation: null,
-  term_extract: null,
-  term_review: null,
-};
-
-export function WorkspacePage() {
+export function ChatPage() {
   const messages = useMessages();
   const t = messages.agentLab;
+  const navigate = useTaskStore((state) => state.navigate);
   const [workspace, setWorkspace] = useState<AgentWorkspace | null>(null);
   const [inventory, setInventory] = useState<AgentInventory | null>(null);
   const [input, setInput] = useState("");
@@ -61,9 +42,6 @@ export function WorkspacePage() {
     null,
   );
   const [editingMemoryText, setEditingMemoryText] = useState("");
-  const [newRecipeName, setNewRecipeName] = useState("");
-  const [editingRecipeId, setEditingRecipeId] = useState<string | null>(null);
-  const [editingRecipeName, setEditingRecipeName] = useState("");
 
   const applyResponse = (response: AgentWorkspaceResponse) => {
     setWorkspace(response.workspace);
@@ -84,40 +62,17 @@ export function WorkspacePage() {
     }
   };
 
-  const load = async () => {
-    applyResponse(await agentBridge.readWorkspace());
-  };
-
   useEffect(() => {
-    void load().catch((err: unknown) => {
-      setError(
-        `${t.loadFailed} ${err instanceof Error ? err.message : ""}`.trim(),
-      );
-    });
+    void (async () => {
+      try {
+        applyResponse(await agentBridge.readWorkspace());
+      } catch (err) {
+        setError(
+          `${t.loadFailed} ${err instanceof Error ? err.message : ""}`.trim(),
+        );
+      }
+    })();
   }, [t.loadFailed]);
-
-  const updateWorkspace = async (
-    patch: Partial<
-      Pick<
-        AgentWorkspace,
-        "workflow_model_id" | "stage_model_ids" | "stage_prompt_ids"
-      >
-    >,
-  ) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const response = await agentBridge.updateWorkspace(patch);
-      setWorkspace(response.workspace);
-      setInventory(response.inventory);
-    } catch (err) {
-      setError(
-        `${t.saveFailed} ${err instanceof Error ? err.message : ""}`.trim(),
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const sendMessage = async () => {
     const text = input.trim();
@@ -126,9 +81,7 @@ export function WorkspacePage() {
     setError(null);
     setInput("");
     try {
-      const response = await agentBridge.sendMessage(text);
-      setWorkspace(response.workspace);
-      setInventory(response.inventory);
+      applyResponse(await agentBridge.sendMessage(text));
     } catch (err) {
       setError(
         `${t.saveFailed} ${err instanceof Error ? err.message : ""}`.trim(),
@@ -139,40 +92,14 @@ export function WorkspacePage() {
     }
   };
 
-  const applyDraft = async () => {
+  const applyDraft = () => {
     if (!workspace?.pending_draft) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const response = await agentBridge.applyDraft(workspace.pending_draft.id);
-      setWorkspace(response.workspace);
-      setInventory(response.inventory);
-    } catch (err) {
-      setError(
-        `${t.saveFailed} ${err instanceof Error ? err.message : ""}`.trim(),
-      );
-    } finally {
-      setBusy(false);
-    }
+    void run(() => agentBridge.applyDraft(workspace.pending_draft!.id));
   };
 
-  const discardDraft = async () => {
+  const discardDraft = () => {
     if (!workspace?.pending_draft) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const response = await agentBridge.discardDraft(
-        workspace.pending_draft.id,
-      );
-      setWorkspace(response.workspace);
-      setInventory(response.inventory);
-    } catch (err) {
-      setError(
-        `${t.saveFailed} ${err instanceof Error ? err.message : ""}`.trim(),
-      );
-    } finally {
-      setBusy(false);
-    }
+    void run(() => agentBridge.discardDraft(workspace.pending_draft!.id));
   };
 
   const createConversation = () => run(() => agentBridge.createConversation());
@@ -227,58 +154,25 @@ export function WorkspacePage() {
     await run(() => agentBridge.updateMemory(next));
   };
 
-  const saveCurrentAsRecipe = async () => {
-    const name = newRecipeName.trim();
-    if (!name) return;
-    setNewRecipeName("");
-    await run(() =>
-      agentBridge.createRecipe({
-        name,
-        stage_model_ids: workspace?.stage_model_ids,
-        stage_prompt_ids: workspace?.stage_prompt_ids,
-      }),
-    );
-  };
-
-  const applyRecipe = (id: string) =>
+  const switchRecipe = (id: string) => {
+    if (!id) return;
     void run(() => agentBridge.applyRecipe(id));
+  };
 
-  const updateRecipeStages = (id: string) =>
+  const updateWorkflowModel = (value: string) =>
     void run(() =>
-      agentBridge.updateRecipe(id, {
-        stage_model_ids: workspace?.stage_model_ids,
-        stage_prompt_ids: workspace?.stage_prompt_ids,
-      }),
+      agentBridge.updateWorkspace({ workflow_model_id: value || null }),
     );
 
-  const deleteRecipe = (id: string) =>
-    void run(() => agentBridge.deleteRecipe(id));
-
-  const startRecipeRename = (id: string, name: string) => {
-    setEditingRecipeId(id);
-    setEditingRecipeName(name);
-  };
-
-  const commitRecipeRename = async () => {
-    const id = editingRecipeId;
-    const name = editingRecipeName.trim();
-    setEditingRecipeId(null);
-    if (!id || !name) return;
-    await run(() => agentBridge.updateRecipe(id, { name }));
-  };
-
-  const promptOptions = useMemo(() => {
-    const empty: Record<PromptKind, AgentInventoryPrompt[]> = {
-      translation: [],
-      glossary: [],
-      glossary_review: [],
-    };
-    if (!inventory) return empty;
-    return {
-      ...empty,
-      ...inventory.prompts,
-    };
-  }, [inventory]);
+  const activeRecipe = pickActiveRecipe(workspace);
+  const profileLookup = new Map(
+    (inventory?.profiles ?? []).map((profile) => [profile.id, profile]),
+  );
+  const promptLookup = new Map(
+    Object.values(inventory?.prompts ?? {})
+      .flat()
+      .map((prompt) => [prompt.id, prompt]),
+  );
 
   return (
     <div className={styles.page}>
@@ -373,169 +267,87 @@ export function WorkspacePage() {
             </div>
           </Panel>
 
-          <Panel label={t.configTitle} subtitle={t.configSub}>
+          <Panel label={t.activeRecipeTitle} subtitle={t.activeRecipeSub}>
             <div className={styles.stack}>
-              <SelectField
-                label={t.workflowModel}
-                value={workspace?.workflow_model_id ?? ""}
-                emptyLabel={t.noModel}
-                disabled={busy || !workspace || !inventory}
-                options={(inventory?.profiles ?? []).map((profile) => ({
-                  value: profile.id,
-                  label: formatProfile(
-                    profile.display_name,
-                    profile.api_key_configured,
-                    t.modelNotConfigured,
-                  ),
-                }))}
-                onChange={(value) =>
-                  void updateWorkspace({ workflow_model_id: value || null })
+              <label className={styles.selectField}>
+                <span>{t.activeRecipeTitle}</span>
+                <select
+                  value={activeRecipe?.id ?? ""}
+                  disabled={busy || !workspace}
+                  onChange={(event) => switchRecipe(event.target.value)}
+                >
+                  <option value="">{t.activeRecipeNone}</option>
+                  {(workspace?.recipes ?? []).map((recipe) => (
+                    <option key={recipe.id} value={recipe.id}>
+                      {recipe.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className={styles.stageSummary}>
+                {MODEL_SLOTS.map((slot) => {
+                  const modelId = workspace?.stage_model_ids[slot] ?? null;
+                  const profile = modelId ? profileLookup.get(modelId) : null;
+                  return (
+                    <div key={`m-${slot}`} className={styles.stageRow}>
+                      <span className={styles.stageLabel}>
+                        {t.stageModel[slot]}
+                      </span>
+                      <span className={styles.stageValue}>
+                        {profile?.display_name ?? t.stageEmptyModel}
+                      </span>
+                    </div>
+                  );
+                })}
+                {PROMPT_SLOTS.map((slot) => {
+                  const promptId = workspace?.stage_prompt_ids[slot] ?? null;
+                  const prompt = promptId ? promptLookup.get(promptId) : null;
+                  return (
+                    <div key={`p-${slot}`} className={styles.stageRow}>
+                      <span className={styles.stageLabel}>
+                        {t.stagePrompt[slot]}
+                      </span>
+                      <span className={styles.stageValue}>
+                        {prompt?.name ?? t.stageEmptyPrompt}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                className={styles.linkButton}
+                onClick={() =>
+                  navigate({ module: "agent-lab", page: "recipes" })
                 }
-              />
-
-              <div className={styles.boundary}>{t.confirmationBoundary}</div>
-
-              {MODEL_SLOTS.map(({ slot, labelKey }) => (
-                <SelectField
-                  key={slot}
-                  label={t[labelKey as keyof typeof t] as string}
-                  value={workspace?.stage_model_ids[slot] ?? ""}
-                  emptyLabel={t.noModel}
-                  disabled={busy || !workspace || !inventory}
-                  options={(inventory?.profiles ?? []).map((profile) => ({
-                    value: profile.id,
-                    label: formatProfile(
-                      profile.display_name,
-                      profile.api_key_configured,
-                      t.modelNotConfigured,
-                    ),
-                  }))}
-                  onChange={(value) =>
-                    void updateWorkspace({
-                      stage_model_ids: {
-                        ...(workspace?.stage_model_ids ?? EMPTY_MODEL_SLOTS),
-                        [slot]: value || null,
-                      },
-                    })
-                  }
-                />
-              ))}
-
-              {PROMPT_SLOTS.map(({ slot, labelKey, kind }) => (
-                <SelectField
-                  key={slot}
-                  label={t[labelKey as keyof typeof t] as string}
-                  value={workspace?.stage_prompt_ids[slot] ?? ""}
-                  emptyLabel={t.noPrompt}
-                  disabled={busy || !workspace || !inventory}
-                  options={promptOptions[kind].map((prompt) => ({
-                    value: prompt.id,
-                    label: prompt.name,
-                  }))}
-                  onChange={(value) =>
-                    void updateWorkspace({
-                      stage_prompt_ids: {
-                        ...(workspace?.stage_prompt_ids ?? EMPTY_PROMPT_SLOTS),
-                        [slot]: value || null,
-                      },
-                    })
-                  }
-                />
-              ))}
+              >
+                {t.activeRecipeManageHere}
+              </button>
             </div>
           </Panel>
 
-          <Panel label={t.recipesTitle} subtitle={t.recipesSub}>
+          <Panel label={t.configTitle} subtitle={t.configSub}>
             <div className={styles.stack}>
-              <div className={styles.memoryAdd}>
-                <input
-                  className={styles.inlineInput}
-                  value={newRecipeName}
-                  placeholder={t.recipeNamePlaceholder}
-                  disabled={busy || !workspace}
-                  onChange={(event) => setNewRecipeName(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void saveCurrentAsRecipe();
-                    }
-                  }}
-                />
-                <Pill
-                  disabled={busy || !newRecipeName.trim()}
-                  onClick={() => void saveCurrentAsRecipe()}
+              <label className={styles.selectField}>
+                <span>{t.workflowModel}</span>
+                <select
+                  value={workspace?.workflow_model_id ?? ""}
+                  disabled={busy || !workspace || !inventory}
+                  onChange={(event) => updateWorkflowModel(event.target.value)}
                 >
-                  {t.recipeSaveCurrent}
-                </Pill>
-              </div>
-              {workspace?.recipes.length ? (
-                <div className={styles.convList}>
-                  {workspace.recipes.map((recipe) => (
-                    <div key={recipe.id} className={styles.convItem}>
-                      {editingRecipeId === recipe.id ? (
-                        <input
-                          className={styles.inlineInput}
-                          value={editingRecipeName}
-                          autoFocus
-                          disabled={busy}
-                          onChange={(event) =>
-                            setEditingRecipeName(event.target.value)
-                          }
-                          onBlur={() => void commitRecipeRename()}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") {
-                              event.preventDefault();
-                              void commitRecipeRename();
-                            } else if (event.key === "Escape") {
-                              setEditingRecipeId(null);
-                            }
-                          }}
-                        />
-                      ) : (
-                        <div className={styles.convName}>{recipe.name}</div>
-                      )}
-                      <div className={styles.convActions}>
-                        <button
-                          type="button"
-                          className={styles.linkButton}
-                          disabled={busy}
-                          onClick={() => applyRecipe(recipe.id)}
-                        >
-                          {t.recipeApply}
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.linkButton}
-                          disabled={busy}
-                          onClick={() => updateRecipeStages(recipe.id)}
-                        >
-                          {t.recipeUpdateStages}
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.linkButton}
-                          disabled={busy}
-                          onClick={() =>
-                            startRecipeRename(recipe.id, recipe.name)
-                          }
-                        >
-                          {t.recipeRename}
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.linkButton}
-                          disabled={busy}
-                          onClick={() => deleteRecipe(recipe.id)}
-                        >
-                          {t.recipeDelete}
-                        </button>
-                      </div>
-                    </div>
+                  <option value="">{t.noModel}</option>
+                  {(inventory?.profiles ?? []).map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.api_key_configured
+                        ? profile.display_name
+                        : `${profile.display_name} (${t.modelNotConfigured})`}
+                    </option>
                   ))}
-                </div>
-              ) : (
-                <div className={styles.empty}>{t.recipeEmpty}</div>
-              )}
+                </select>
+              </label>
+              <div className={styles.boundary}>{t.confirmationBoundary}</div>
             </div>
           </Panel>
         </div>
@@ -593,13 +405,13 @@ export function WorkspacePage() {
                   {JSON.stringify(workspace.pending_draft.payload, null, 2)}
                 </pre>
                 <div className={styles.actions}>
-                  <Pill disabled={busy} onClick={() => void applyDraft()}>
+                  <Pill disabled={busy} onClick={applyDraft}>
                     {t.applyDraft}
                   </Pill>
                   <Pill
                     variant="ghost"
                     disabled={busy}
-                    onClick={() => void discardDraft()}
+                    onClick={discardDraft}
                   >
                     {t.discardDraft}
                   </Pill>
@@ -723,44 +535,26 @@ export function WorkspacePage() {
   );
 }
 
-function SelectField({
-  label,
-  value,
-  emptyLabel,
-  disabled,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  emptyLabel: string;
-  disabled: boolean;
-  options: Array<{ value: string; label: string }>;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className={styles.selectField}>
-      <span>{label}</span>
-      <select
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        <option value="">{emptyLabel}</option>
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
+function pickActiveRecipe(workspace: AgentWorkspace | null): AgentRecipe | null {
+  if (!workspace) return null;
+  for (const recipe of workspace.recipes) {
+    if (
+      sameSlot(recipe.stage_model_ids, workspace.stage_model_ids) &&
+      sameSlot(recipe.stage_prompt_ids, workspace.stage_prompt_ids)
+    ) {
+      return recipe;
+    }
+  }
+  return null;
 }
 
-function formatProfile(
-  name: string,
-  configured: boolean,
-  missingLabel: string,
-) {
-  return configured ? name : `${name} (${missingLabel})`;
+function sameSlot(
+  a: Record<string, string | null>,
+  b: Record<string, string | null>,
+): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    if ((a[key] ?? null) !== (b[key] ?? null)) return false;
+  }
+  return true;
 }

@@ -13,6 +13,7 @@ from uuid import uuid4
 
 AgentRole = Literal["user", "assistant", "system"]
 DraftStatus = Literal["pending", "applied", "discarded"]
+AgentTaskKind = Literal["translation", "glossary", "glossary_review"]
 
 MODEL_SLOTS: tuple[str, ...] = ("translation", "term_extract", "term_review")
 PROMPT_SLOTS: tuple[str, ...] = ("translation", "term_extract", "term_review")
@@ -304,6 +305,55 @@ class AgentRecipe:
 
 
 @dataclass(frozen=True)
+class AgentActiveTask:
+    """Agent Lab's cross-kind lock for one confirmed task start."""
+
+    task_id: str
+    kind: AgentTaskKind
+    conversation_id: str
+    started_at: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        task_id: str,
+        kind: AgentTaskKind,
+        conversation_id: str,
+        started_at: str,
+    ) -> "AgentActiveTask":
+        return cls(
+            task_id=task_id,
+            kind=kind,
+            conversation_id=conversation_id,
+            started_at=started_at,
+        )
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "AgentActiveTask | None":
+        raw_kind = str(data.get("kind") or "")
+        if raw_kind not in ("translation", "glossary", "glossary_review"):
+            return None
+        task_id = str(data.get("task_id") or "")
+        if not task_id:
+            return None
+        return cls(
+            task_id=task_id,
+            kind=raw_kind,  # type: ignore[arg-type]
+            conversation_id=str(data.get("conversation_id") or ""),
+            started_at=str(data.get("started_at") or now_iso()),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "kind": self.kind,
+            "conversation_id": self.conversation_id,
+            "started_at": self.started_at,
+        }
+
+
+@dataclass(frozen=True)
 class AgentWorkspaceState:
     workflow_model_id: str | None = None
     stage_model_ids: Mapping[str, str | None] = field(
@@ -314,6 +364,7 @@ class AgentWorkspaceState:
     )
     memories: tuple[str, ...] = ()
     recipes: tuple[AgentRecipe, ...] = ()
+    active_task: AgentActiveTask | None = None
     conversations: tuple[AgentConversation, ...] = ()
     active_conversation_id: str | None = None
     updated_at: str = field(default_factory=now_iso)
@@ -335,6 +386,7 @@ class AgentWorkspaceState:
             stage_prompt_ids=_slot_mapping(data.get("stage_prompt_ids"), PROMPT_SLOTS),
             memories=_memories_from(data.get("memories")),
             recipes=_recipes_from(data.get("recipes")),
+            active_task=_active_task_from(data.get("active_task")),
             conversations=conversations,
             active_conversation_id=active_id,
             updated_at=str(data.get("updated_at") or now_iso()),
@@ -347,6 +399,7 @@ class AgentWorkspaceState:
             "stage_prompt_ids": dict(self.stage_prompt_ids),
             "memories": list(self.memories),
             "recipes": [recipe.to_dict() for recipe in self.recipes],
+            "active_task": self.active_task.to_dict() if self.active_task else None,
             "conversations": [
                 conversation.to_dict() for conversation in self.conversations
             ],
@@ -467,6 +520,16 @@ class AgentWorkspaceState:
         )
         return replace(self, recipes=recipes, updated_at=now_iso())
 
+    def with_active_task(
+        self, active_task: AgentActiveTask
+    ) -> "AgentWorkspaceState":
+        return replace(self, active_task=active_task, updated_at=now_iso())
+
+    def clear_active_task(self) -> "AgentWorkspaceState":
+        if self.active_task is None:
+            return self
+        return replace(self, active_task=None, updated_at=now_iso())
+
 
 def _messages_from(value: object) -> tuple[AgentMessage, ...]:
     if not isinstance(value, list):
@@ -498,6 +561,12 @@ def _recipes_from(value: object) -> tuple[AgentRecipe, ...]:
     return tuple(
         AgentRecipe.from_dict(item) for item in value if isinstance(item, Mapping)
     )
+
+
+def _active_task_from(value: object) -> AgentActiveTask | None:
+    if not isinstance(value, Mapping):
+        return None
+    return AgentActiveTask.from_dict(value)
 
 
 def _full_slot_mapping(

@@ -198,6 +198,8 @@ def build_default_router(
         router,
         cache_root=cache_root,
         profile_store=profile_store,
+        settings_store=settings_store,
+        task_service=task_service,
         llm_client_factory=proxy_aware_factory,
     )
     register_tasks(router, service=task_service)

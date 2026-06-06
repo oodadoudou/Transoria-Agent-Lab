@@ -12,10 +12,17 @@ from transoria.agent.configuration_agent import (
     build_user_prompt,
     parse_agent_response,
 )
+from transoria.agent.completeness import (
+    START_DRAFT_KINDS,
+    TASK_KIND_BY_DRAFT_KIND,
+    all_start_draft_completeness,
+    assess_start_draft,
+)
 from transoria.agent.project_store import AgentProjectStore
 from transoria.agent.schemas import (
     MODEL_SLOTS,
     PROMPT_SLOTS,
+    AgentActiveTask,
     AgentActionDraft,
     AgentConversation,
     AgentMessage,
@@ -25,9 +32,14 @@ from transoria.agent.schemas import (
 from transoria.bridge.errors import BridgeError
 from transoria.bridge.handlers._utils import expect_string
 from transoria.bridge.router import BridgeRouter
+from transoria.bridge.task_service import TaskService
+from transoria.domain import TaskStatus
 from transoria.llm.client import ChatRequest, LlmClient, LlmRequestError
 from transoria.model_profiles import ModelProfileStore
 from transoria.prompts import PromptKind, PromptPreset, PromptPresetStore
+from transoria.runtime.cache import TaskNotFoundError
+from transoria.settings import SettingsStore
+from transoria.workflows.agent.task_starts import start_agent_task
 
 LlmClientFactory = Callable[[], LlmClient]
 
@@ -49,13 +61,15 @@ def _build_handlers(
     cache_root: Path,
     project_store: AgentProjectStore,
     profile_store: ModelProfileStore,
+    settings_store: SettingsStore,
+    task_service: TaskService,
     llm_client_factory: LlmClientFactory,
 ) -> dict[str, object]:
     def respond(state: AgentWorkspaceState) -> dict[str, object]:
         return _workspace_response(state, profile_store, cache_root)
 
     def read_workspace(_payload: Mapping[str, object]) -> dict[str, object]:
-        return respond(project_store.load())
+        return respond(_load_with_reconciled_active_task(project_store, task_service))
 
     def update_workspace(payload: Mapping[str, object]) -> dict[str, object]:
         patch = payload.get("patch")
@@ -88,7 +102,7 @@ def _build_handlers(
                 details={"max_length": 8000},
             )
 
-        current = project_store.load()
+        current = _load_with_reconciled_active_task(project_store, task_service)
         conversation = _require_active(current)
         conversation = conversation.append_message(
             AgentMessage.create("user", content)
@@ -102,6 +116,8 @@ def _build_handlers(
             user_message=content,
             profile_store=profile_store,
             cache_root=cache_root,
+            settings_store=settings_store,
+            task_service=task_service,
             llm_client_factory=llm_client_factory,
         )
         conversation = conversation.append_message(
@@ -115,7 +131,7 @@ def _build_handlers(
 
     def apply_draft(payload: Mapping[str, object]) -> dict[str, object]:
         draft_id = expect_string(payload, "draft_id")
-        current = project_store.load()
+        current = _load_with_reconciled_active_task(project_store, task_service)
         conversation = _require_active(current)
         draft = conversation.pending_draft
         if draft is None or draft.id != draft_id or draft.status != "pending":
@@ -128,6 +144,8 @@ def _build_handlers(
             draft,
             profile_store=profile_store,
             cache_root=cache_root,
+            settings_store=settings_store,
+            task_service=task_service,
         )
         conversation = _require_active(applied_state)
         conversation = conversation.archive_pending("applied")
@@ -345,6 +363,8 @@ def _generate_reply(
     user_message: str,
     profile_store: ModelProfileStore,
     cache_root: Path,
+    settings_store: SettingsStore,
+    task_service: TaskService,
     llm_client_factory: LlmClientFactory,
 ) -> tuple[str, AgentActionDraft | None]:
     workflow_model_id = state.workflow_model_id
@@ -368,7 +388,10 @@ def _generate_reply(
     prompt = build_user_prompt(
         user_message=user_message,
         inventory=inventory,
-        current_state=_llm_context(state),
+        current_state=_llm_context(
+            state,
+            settings_store=settings_store,
+        ),
     )
     request = ChatRequest(
         model=profile,
@@ -393,7 +416,13 @@ def _generate_reply(
     reply, draft = parse_agent_response(response.content)
     if draft is not None:
         try:
-            _validate_draft(draft, profile_store=profile_store, cache_root=cache_root)
+            _validate_draft(
+                draft,
+                state=state,
+                profile_store=profile_store,
+                cache_root=cache_root,
+                task_service=task_service,
+            )
         except BridgeError as exc:
             return (f"{reply}\n\n（已忽略无法应用的草案：{exc}）".strip(), None)
     return reply, draft
@@ -439,8 +468,16 @@ def _apply_draft(
     *,
     profile_store: ModelProfileStore,
     cache_root: Path,
+    settings_store: SettingsStore,
+    task_service: TaskService,
 ) -> tuple[AgentWorkspaceState, dict[str, object]]:
-    _validate_draft(draft, profile_store=profile_store, cache_root=cache_root)
+    _validate_draft(
+        draft,
+        state=state,
+        profile_store=profile_store,
+        cache_root=cache_root,
+        task_service=task_service,
+    )
     if draft.kind == "update_workspace":
         next_state = _apply_workspace_patch(
             state,
@@ -475,6 +512,33 @@ def _apply_draft(
             "kind": draft.kind,
             "recipe": recipe.to_dict(),
         }
+    if draft.kind in START_DRAFT_KINDS:
+        _raise_if_active_task_locked(state)
+        conversation = _require_active(state)
+        result = start_agent_task(
+            draft_kind=draft.kind,
+            payload=draft.payload,
+            state=state,
+            task_service=task_service,
+            settings_store=settings_store,
+            profile_store=profile_store,
+            cache_root=cache_root,
+            request_id=draft.id,
+        )
+        task_id = str(result.get("task_id") or "")
+        task_kind = TASK_KIND_BY_DRAFT_KIND[draft.kind]
+        started_at = str(result.get("started_at") or "")
+        active_task = AgentActiveTask.create(
+            task_id=task_id,
+            kind=task_kind,  # type: ignore[arg-type]
+            conversation_id=conversation.id,
+            started_at=started_at,
+        )
+        return state.with_active_task(active_task), {
+            "kind": draft.kind,
+            "task": active_task.to_dict(),
+            "start_result": dict(result),
+        }
     # Unreachable: _validate_draft above rejects unsupported kinds first.
     raise BridgeError.invalid_argument(  # pragma: no cover
         f"unsupported draft kind: {draft.kind!r}",
@@ -485,8 +549,10 @@ def _apply_draft(
 def _validate_draft(
     draft: AgentActionDraft,
     *,
+    state: AgentWorkspaceState,
     profile_store: ModelProfileStore,
     cache_root: Path,
+    task_service: TaskService,
 ) -> None:
     if draft.kind == "update_workspace":
         _apply_workspace_patch(
@@ -509,10 +575,84 @@ def _validate_draft(
             cache_root=cache_root,
         )
         return
+    if draft.kind in START_DRAFT_KINDS:
+        _raise_if_active_task_locked(state)
+        completeness = assess_start_draft(
+            draft_kind=draft.kind,
+            state=state,
+            payload=draft.payload,
+        )
+        if not completeness.complete:
+            raise BridgeError.invalid_argument(
+                "task-start draft is incomplete.",
+                details=completeness.to_dict(),
+            )
+        _validate_glossary_task_reference(draft, task_service=task_service)
+        return
     raise BridgeError.invalid_argument(
         f"unsupported draft kind: {draft.kind!r}",
         details={"kind": draft.kind},
     )
+
+
+def _load_with_reconciled_active_task(
+    project_store: AgentProjectStore,
+    task_service: TaskService,
+) -> AgentWorkspaceState:
+    state = project_store.load()
+    if state.active_task is None:
+        return state
+    if _active_task_is_terminal(state.active_task, task_service):
+        return project_store.save(state.clear_active_task())
+    return state
+
+
+def _active_task_is_terminal(
+    active_task: AgentActiveTask,
+    task_service: TaskService,
+) -> bool:
+    try:
+        record = task_service.cache.load_record(active_task.task_id)
+    except (TaskNotFoundError, ValueError, OSError):
+        return True
+    return record.status in {
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.STOPPED,
+    }
+
+
+def _raise_if_active_task_locked(state: AgentWorkspaceState) -> None:
+    if state.active_task is None:
+        return
+    active = state.active_task
+    raise BridgeError(
+        "bridge.conflict",
+        (
+            f"检测到当前正在执行 {active.kind} 任务（任务 ID: {active.task_id}），"
+            "暂时无法开始另一个任务。请等待任务结束后再继续。"
+        ),
+        retryable=True,
+        details=active.to_dict(),
+    )
+
+
+def _validate_glossary_task_reference(
+    draft: AgentActionDraft,
+    *,
+    task_service: TaskService,
+) -> None:
+    if draft.kind not in {"start_glossary_review_task", "start_translation_task"}:
+        return
+    task_id = draft.payload.get("glossary_task_id")
+    if task_id is None and draft.kind == "start_translation_task":
+        return
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise BridgeError.invalid_argument(
+            "glossary_task_id is required.",
+            field="glossary_task_id",
+        )
+    task_service.read_artifacts(kind="glossary", task_id=task_id.strip())
 
 
 def _create_prompt_preset(
@@ -751,6 +891,7 @@ def _workspace_wire(state: AgentWorkspaceState) -> dict[str, object]:
         "stage_prompt_ids": dict(state.stage_prompt_ids),
         "memories": list(state.memories),
         "recipes": [recipe.to_dict() for recipe in state.recipes],
+        "active_task": state.active_task.to_dict() if state.active_task else None,
         "active_conversation_id": state.active_conversation_id,
         "conversations": [
             _conversation_summary(conversation) for conversation in state.conversations
@@ -778,13 +919,20 @@ def _conversation_summary(conversation: AgentConversation) -> dict[str, object]:
     }
 
 
-def _llm_context(state: AgentWorkspaceState) -> dict[str, object]:
+def _llm_context(
+    state: AgentWorkspaceState,
+    *,
+    settings_store: SettingsStore,
+) -> dict[str, object]:
     active = state.active()
     recent = active.messages[-_MAX_CONTEXT_MESSAGES:] if active else ()
     return {
         "workflow_model_id": state.workflow_model_id,
         "stage_model_ids": dict(state.stage_model_ids),
         "stage_prompt_ids": dict(state.stage_prompt_ids),
+        "active_task": state.active_task.to_dict() if state.active_task else None,
+        "start_task_completeness": all_start_draft_completeness(state),
+        "settings_defaults": _settings_defaults(settings_store),
         "memories": list(state.memories),
         "recipes": [
             {"id": recipe.id, "name": recipe.name, "description": recipe.description}
@@ -793,6 +941,30 @@ def _llm_context(state: AgentWorkspaceState) -> dict[str, object]:
         "recent_messages": [
             {"role": message.role, "content": message.content} for message in recent
         ],
+    }
+
+
+def _settings_defaults(settings_store: SettingsStore) -> dict[str, object]:
+    settings = settings_store.load_all()
+    return {
+        "translation": {
+            "input_dir": settings.translation.input_folder,
+            "output_dir": settings.translation.output_folder,
+            "source_language": settings.translation.source_language,
+            "target_language": settings.translation.target_language,
+        },
+        "glossary": {
+            "input_dir": settings.glossary.input_folder,
+            "output_dir": settings.glossary.output_folder,
+            "source_language": settings.glossary.source_language,
+            "target_language": settings.glossary.target_language,
+            "novel_background": settings.glossary.novel_background,
+        },
+        "glossary_review": {
+            "input_dir": settings.glossary_review.input_folder,
+            "novel_background": settings.glossary_review.novel_background,
+            "output_filename": settings.glossary_review.output_filename,
+        },
     }
 
 
@@ -873,12 +1045,16 @@ def register(
     *,
     cache_root: Path,
     profile_store: ModelProfileStore,
+    settings_store: SettingsStore,
+    task_service: TaskService,
     llm_client_factory: LlmClientFactory,
 ) -> None:
     handlers = _build_handlers(
         cache_root=cache_root,
         project_store=AgentProjectStore.from_cache_root(cache_root),
         profile_store=profile_store,
+        settings_store=settings_store,
+        task_service=task_service,
         llm_client_factory=llm_client_factory,
     )
     for method, handler in handlers.items():

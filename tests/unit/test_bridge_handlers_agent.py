@@ -6,10 +6,15 @@ import pytest
 
 from transoria.agent.configuration_agent import AGENT_SYSTEM_PROMPT
 from transoria.bridge import BridgeError, build_default_router
+from transoria.bridge.handlers.settings import default_store
+from transoria.bridge.task_service import TaskService
+from transoria.domain import TaskKind, TaskStatus
 from transoria.llm.client import ChatRequest, ChatResponse, LlmRequestError
 from transoria.llm.config import ModelConfig, ProviderFormat
 from transoria.llm.usage import TokenUsage
 from transoria.model_profiles import ModelProfileStore
+from transoria.prompts import DEFAULT_TRANSLATION_PRESET_ID
+from transoria.runtime.task_record import TaskRecord
 
 
 class RaisingAgentClient:
@@ -534,6 +539,199 @@ def test_invalid_recipe_draft_is_not_stored(tmp_path: Path) -> None:
 
 
 # --- Agent → API call mechanics ---------------------------------------------
+
+
+def test_agent_start_translation_draft_applies_with_task_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_start_agent_task(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        service = kwargs["task_service"]
+        assert isinstance(service, TaskService)
+        service.cache.save_task(
+            TaskRecord(
+                id="translation-agent-1",
+                kind=TaskKind.TRANSLATION,
+                status=TaskStatus.RUNNING,
+            )
+        )
+        return {
+            "task_id": "translation-agent-1",
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        "transoria.bridge.handlers.agent.start_agent_task",
+        fake_start_agent_task,
+    )
+    input_dir = tmp_path / "novel"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "book.txt").write_text("source text", encoding="utf-8")
+    router, _ = _router_with_workflow(
+        tmp_path,
+        f"""
+        {{
+          "reply": "Ready to start translation.",
+          "draft": {{
+            "kind": "start_translation_task",
+            "title": "Start translation",
+            "summary": "Use per-task chat overrides.",
+            "payload": {{
+              "input_dir": "{input_dir}",
+              "output_dir": "{output_dir}",
+              "source_language": "kr",
+              "target_language": "zh"
+            }}
+          }}
+        }}
+        """,
+    )
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "stage_model_ids": {"translation": "profile-workflow"},
+                "stage_prompt_ids": {
+                    "translation": DEFAULT_TRANSLATION_PRESET_ID,
+                },
+            }
+        },
+    )
+
+    response = router.call("agent.send_message", {"message": "start translation"})
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_translation_task"
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+    workspace = applied["workspace"]
+
+    assert workspace["active_task"] == {
+        "task_id": "translation-agent-1",
+        "kind": "translation",
+        "conversation_id": workspace["active_conversation_id"],
+        "started_at": "2026-01-01T00:00:00+00:00",
+    }
+    assert applied["result"]["task"]["kind"] == "translation"
+    assert captured["draft_kind"] == "start_translation_task"
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["input_dir"] == str(input_dir)
+    settings = default_store(tmp_path).load_all()
+    assert settings.translation.input_folder == ""
+    assert settings.translation.output_folder == ""
+
+
+def test_agent_start_translation_draft_is_dropped_when_recipe_incomplete(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "novel"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "book.txt").write_text("source text", encoding="utf-8")
+    router, _ = _router_with_workflow(
+        tmp_path,
+        f"""
+        {{
+          "reply": "Ready to start translation.",
+          "draft": {{
+            "kind": "start_translation_task",
+            "title": "Start translation",
+            "summary": "Missing translation stage recipe.",
+            "payload": {{
+              "input_dir": "{input_dir}",
+              "output_dir": "{output_dir}",
+              "source_language": "kr",
+              "target_language": "zh"
+            }}
+          }}
+        }}
+        """,
+    )
+
+    response = router.call("agent.send_message", {"message": "start translation"})
+
+    assert response["workspace"]["pending_draft"] is None
+    assert "已忽略无法应用的草案" in response["workspace"]["messages"][-1]["content"]
+
+
+def test_agent_start_task_draft_is_blocked_by_active_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def fake_start_agent_task(**kwargs: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        service = kwargs["task_service"]
+        assert isinstance(service, TaskService)
+        service.cache.save_task(
+            TaskRecord(
+                id=f"translation-agent-{calls}",
+                kind=TaskKind.TRANSLATION,
+                status=TaskStatus.RUNNING,
+            )
+        )
+        return {
+            "task_id": f"translation-agent-{calls}",
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        "transoria.bridge.handlers.agent.start_agent_task",
+        fake_start_agent_task,
+    )
+    input_dir = tmp_path / "novel"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "book.txt").write_text("source text", encoding="utf-8")
+    content = f"""
+    {{
+      "reply": "Ready to start translation.",
+      "draft": {{
+        "kind": "start_translation_task",
+        "title": "Start translation",
+        "summary": "Use per-task chat overrides.",
+        "payload": {{
+          "input_dir": "{input_dir}",
+          "output_dir": "{output_dir}",
+          "source_language": "kr",
+          "target_language": "zh"
+        }}
+      }}
+    }}
+    """
+    router, _ = _router_with_workflow(tmp_path, content)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "stage_model_ids": {"translation": "profile-workflow"},
+                "stage_prompt_ids": {
+                    "translation": DEFAULT_TRANSLATION_PRESET_ID,
+                },
+            }
+        },
+    )
+    draft = router.call("agent.send_message", {"message": "start translation"})[
+        "workspace"
+    ]["pending_draft"]
+    router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    response = router.call("agent.send_message", {"message": "start another"})
+
+    assert response["workspace"]["pending_draft"] is None
+    assert calls == 1
+    assert "检测到当前正在执行 translation 任务" in response["workspace"]["messages"][-1][
+        "content"
+    ]
 
 
 def test_send_message_calls_api_with_system_prompt_and_inventory(

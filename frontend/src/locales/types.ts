@@ -324,7 +324,8 @@ export interface Messages {
       epubMetadata: string;
     };
     agentLab: {
-      workspace: string;
+      chat: string;
+      recipes: string;
     };
     appSettings: {
       general: string;
@@ -379,15 +380,43 @@ export interface Messages {
     untitledConversation: string;
     renameConversation: string;
     deleteConversation: string;
-    recipesTitle: string;
-    recipesSub: string;
-    recipeNamePlaceholder: string;
-    recipeSaveCurrent: string;
+    activeRecipeTitle: string;
+    activeRecipeSub: string;
+    activeRecipeNone: string;
+    activeRecipeManageHere: string;
+    recipesPageTitle: string;
+    recipesPageSub: string;
+    recipesSectionTitle: string;
+    recipesSectionSub: string;
+    activeStageTitle: string;
+    activeStageSub: string;
+    stageModel: {
+      translation: string;
+      term_extract: string;
+      term_review: string;
+    };
+    stagePrompt: {
+      translation: string;
+      term_extract: string;
+      term_review: string;
+    };
+    stageEmptyModel: string;
+    stageEmptyPrompt: string;
+    recipeNew: string;
+    recipeEdit: string;
     recipeApply: string;
-    recipeUpdateStages: string;
-    recipeRename: string;
     recipeDelete: string;
+    recipeApplied: string;
     recipeEmpty: string;
+    recipeModalTitleCreate: string;
+    recipeModalTitleEdit: string;
+    recipeFieldName: string;
+    recipeFieldNamePlaceholder: string;
+    recipeFieldDescription: string;
+    recipeFieldDescriptionPlaceholder: string;
+    recipeSave: string;
+    recipeCancel: string;
+    recipeDeleteConfirm: string;
   };
   translation: {
     crumb: string;

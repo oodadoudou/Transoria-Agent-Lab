@@ -87,7 +87,10 @@ function buildTree(messages: ReturnType<typeof useMessages>): {
       {
         id: "agent-lab",
         label: messages.rail.agentLab,
-        children: null,
+        children: [
+          { page: "chat", label: messages.pages.agentLab.chat },
+          { page: "recipes", label: messages.pages.agentLab.recipes },
+        ],
       },
       {
         id: "app-settings",
@@ -142,9 +145,8 @@ export function Rail() {
   const navigate = useTaskStore((state) => state.navigate);
   const tree = buildTree(messages);
 
-  const [expanded, setExpanded] = useState<ReadonlySet<ModuleId>>(
-    loadExpandedModules,
-  );
+  const [expanded, setExpanded] =
+    useState<ReadonlySet<ModuleId>>(loadExpandedModules);
 
   const toggle = (id: ModuleId) => {
     setExpanded((prev) => {

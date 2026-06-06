@@ -1714,8 +1714,27 @@ class TaskService:
         with self._start_locks["translation"]:
             return self._start_translation_locked(request_id)
 
+    def start_translation_with_config(
+        self, config: TranslationConfig, *, request_id: str
+    ) -> dict[str, object]:
+        with self._start_locks["translation"]:
+            return self._start_translation_with_config_locked(
+                config,
+                request_id=request_id,
+            )
+
     def _start_translation_locked(self, request_id: str) -> dict[str, object]:
-        config, model, preset = self._build_translation_config()
+        config, _model, _preset = self._build_translation_config()
+        return self._start_translation_with_config_locked(
+            config,
+            request_id=request_id,
+        )
+
+    def _start_translation_with_config_locked(
+        self, config: TranslationConfig, *, request_id: str
+    ) -> dict[str, object]:
+        model = config.model
+        preset = config.prompt_preset
         input_dir = config.input_dir
         output_dir = config.output_dir
         source_lang = config.source_language
@@ -1845,8 +1864,27 @@ class TaskService:
         with self._start_locks["glossary"]:
             return self._start_glossary_locked(request_id)
 
+    def start_glossary_with_config(
+        self, config: GlossaryConfig, *, request_id: str
+    ) -> dict[str, object]:
+        with self._start_locks["glossary"]:
+            return self._start_glossary_with_config_locked(
+                config,
+                request_id=request_id,
+            )
+
     def _start_glossary_locked(self, request_id: str) -> dict[str, object]:
-        config, model, preset = self._build_glossary_config()
+        config, _model, _preset = self._build_glossary_config()
+        return self._start_glossary_with_config_locked(
+            config,
+            request_id=request_id,
+        )
+
+    def _start_glossary_with_config_locked(
+        self, config: GlossaryConfig, *, request_id: str
+    ) -> dict[str, object]:
+        model = config.model
+        preset = config.prompt_preset
         input_dir = config.input_dir
         output_dir = config.output_dir
         source_lang = config.source_language
@@ -1989,8 +2027,27 @@ class TaskService:
         with self._start_locks["glossary_review"]:
             return self._start_glossary_review_locked(request_id)
 
+    def start_glossary_review_with_config(
+        self, config: GlossaryReviewConfig, *, request_id: str
+    ) -> dict[str, object]:
+        with self._start_locks["glossary_review"]:
+            return self._start_glossary_review_with_config_locked(
+                config,
+                request_id=request_id,
+            )
+
     def _start_glossary_review_locked(self, request_id: str) -> dict[str, object]:
-        config, model, preset = self._build_glossary_review_config()
+        config, _model, _preset = self._build_glossary_review_config()
+        return self._start_glossary_review_with_config_locked(
+            config,
+            request_id=request_id,
+        )
+
+    def _start_glossary_review_with_config_locked(
+        self, config: GlossaryReviewConfig, *, request_id: str
+    ) -> dict[str, object]:
+        model = config.model
+        preset = config.prompt_preset
 
         self._purge_kind_for_start(
             kind="glossary_review", task_kind=TaskKind.GLOSSARY_REVIEW

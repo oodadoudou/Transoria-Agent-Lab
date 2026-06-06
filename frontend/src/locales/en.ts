@@ -573,7 +573,7 @@ export const en: Messages = {
       epubConvert: "EPUB to TXT",
       epubMetadata: "EPUB Metadata",
     },
-    agentLab: { workspace: "Workspace" },
+    agentLab: { chat: "Chat", recipes: "Recipes" },
     appSettings: { general: "General" },
   },
   agentLab: {
@@ -634,16 +634,50 @@ export const en: Messages = {
     untitledConversation: "Untitled conversation",
     renameConversation: "Rename",
     deleteConversation: "Delete",
-    recipesTitle: "Recipes",
-    recipesSub:
-      "Save the current per-stage model and prompt choices as a reusable recipe; applying one overwrites the current stage selections.",
-    recipeNamePlaceholder: "Recipe name, e.g. Cheap bulk / High-quality review",
-    recipeSaveCurrent: "Save current",
+    activeRecipeTitle: "Active recipe",
+    activeRecipeSub:
+      "Tasks the agent starts will use the stage model + prompt combination shown below.",
+    activeRecipeNone: "No recipe applied yet.",
+    activeRecipeManageHere: "Manage recipes from the Recipes sidebar page.",
+    recipesPageTitle: "Recipes",
+    recipesPageSub:
+      "A recipe binds the model and prompt for each of the three stages (translation / term extraction / term review) into a reusable bundle.",
+    recipesSectionTitle: "My recipes",
+    recipesSectionSub:
+      "Create, edit, or apply recipes. The currently applied recipe is what the chat will use.",
+    activeStageTitle: "Active stage selection",
+    activeStageSub:
+      "Reflects whatever recipe was last applied. Click Apply on any recipe below to switch.",
+    stageModel: {
+      translation: "Translation model",
+      term_extract: "Term extraction model",
+      term_review: "Term review model",
+    },
+    stagePrompt: {
+      translation: "Translation prompt",
+      term_extract: "Term extraction prompt",
+      term_review: "Term review prompt",
+    },
+    stageEmptyModel: "No model selected",
+    stageEmptyPrompt: "No prompt selected",
+    recipeNew: "+ New recipe",
+    recipeEdit: "Edit",
     recipeApply: "Apply",
-    recipeUpdateStages: "Update to current",
-    recipeRename: "Rename",
     recipeDelete: "Delete",
-    recipeEmpty: "No recipes yet.",
+    recipeApplied: "Active",
+    recipeEmpty:
+      "No recipes yet. Click \u201cNew recipe\u201d at the top to create one.",
+    recipeModalTitleCreate: "New recipe",
+    recipeModalTitleEdit: "Edit recipe",
+    recipeFieldName: "Name",
+    recipeFieldNamePlaceholder: "e.g. High-quality review / Cheap bulk",
+    recipeFieldDescription: "Description (optional)",
+    recipeFieldDescriptionPlaceholder:
+      "Short note about when to use this recipe.",
+    recipeSave: "Save",
+    recipeCancel: "Cancel",
+    recipeDeleteConfirm:
+      "Delete this recipe? Tasks already started with it are unaffected.",
   },
   translation: {
     crumb: "Translation",

@@ -68,6 +68,8 @@ export type AgentModelSlot = "translation" | "term_extract" | "term_review";
 
 export type AgentPromptSlot = "translation" | "term_extract" | "term_review";
 
+export type AgentTaskKind = "translation" | "glossary" | "glossary_review";
+
 export interface AgentMessage {
   id: string;
   role: AgentMessageRole;
@@ -110,12 +112,20 @@ export interface AgentRecipeInput {
   stage_prompt_ids?: Record<AgentPromptSlot, string | null>;
 }
 
+export interface AgentActiveTask {
+  task_id: string;
+  kind: AgentTaskKind;
+  conversation_id: string;
+  started_at: string;
+}
+
 export interface AgentWorkspace {
   workflow_model_id: string | null;
   stage_model_ids: Record<AgentModelSlot, string | null>;
   stage_prompt_ids: Record<AgentPromptSlot, string | null>;
   memories: string[];
   recipes: AgentRecipe[];
+  active_task: AgentActiveTask | null;
   active_conversation_id: string | null;
   conversations: AgentConversationSummary[];
   messages: AgentMessage[];

@@ -42,7 +42,9 @@ export type AppSettingsPage = "general";
 
 export type ModelPage = "general";
 
-export type AgentLabPage = "workspace";
+export type AgentLabPage = "chat" | "recipes";
+
+const AGENT_LAB_PAGES: ReadonlyArray<AgentLabPage> = ["chat", "recipes"];
 
 export type Route =
   | { module: "model"; page: ModelPage }
@@ -74,7 +76,7 @@ export function defaultPageFor(module: ModuleId): Route {
     case "general-tools":
       return { module: "general-tools", page: "batchReplacement" };
     case "agent-lab":
-      return { module: "agent-lab", page: "workspace" };
+      return { module: "agent-lab", page: "chat" };
     case "app-settings":
       return { module: "app-settings", page: "general" };
   }
@@ -83,7 +85,8 @@ export function defaultPageFor(module: ModuleId): Route {
 const ROUTE_STORAGE_KEY = "transoria.route";
 
 function loadInitialRoute(): Route {
-  if (typeof window === "undefined") return { module: "model", page: "general" };
+  if (typeof window === "undefined")
+    return { module: "model", page: "general" };
   try {
     const raw = window.localStorage.getItem(ROUTE_STORAGE_KEY);
     if (!raw) return { module: "model", page: "general" };
@@ -103,7 +106,8 @@ function persistRoute(route: Route): void {
 }
 
 function coerceRoute(value: unknown): Route {
-  if (!value || typeof value !== "object") return { module: "model", page: "general" };
+  if (!value || typeof value !== "object")
+    return { module: "model", page: "general" };
   const candidate = value as { module?: unknown; page?: unknown };
   switch (candidate.module) {
     case "model":
@@ -133,7 +137,9 @@ function coerceRoute(value: unknown): Route {
       }
       return { module: "glossary", page: "run" };
     case "glossary-review":
-      if (["run", "review", "settings", "prompt"].includes(String(candidate.page))) {
+      if (
+        ["run", "review", "settings", "prompt"].includes(String(candidate.page))
+      ) {
         return {
           module: "glossary-review",
           page: candidate.page as GlossaryReviewPage,
@@ -149,7 +155,10 @@ function coerceRoute(value: unknown): Route {
       }
       return { module: "general-tools", page: "batchReplacement" };
     case "agent-lab":
-      return { module: "agent-lab", page: "workspace" };
+      if (AGENT_LAB_PAGES.includes(candidate.page as AgentLabPage)) {
+        return { module: "agent-lab", page: candidate.page as AgentLabPage };
+      }
+      return { module: "agent-lab", page: "chat" };
     case "app-settings":
       return { module: "app-settings", page: "general" };
     default:

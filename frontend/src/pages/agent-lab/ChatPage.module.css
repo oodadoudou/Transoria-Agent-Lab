@@ -337,6 +337,36 @@
   font-size: 11px;
 }
 
+.stageSummary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stageRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--panel);
+}
+
+.stageLabel {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.stageValue {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
 @media (max-width: 1180px) {
   .grid {
     grid-template-columns: 1fr;

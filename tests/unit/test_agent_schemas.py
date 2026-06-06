@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from transoria.agent.schemas import (
+    AgentActiveTask,
     AgentActionDraft,
     AgentConversation,
     AgentMessage,
@@ -62,13 +63,29 @@ def test_workspace_active_falls_back_to_first_when_pointer_stale() -> None:
 
 
 def test_workspace_round_trips_recipes_and_memories() -> None:
-    state = AgentWorkspaceState.empty().with_memories(("keep names",)).add_recipe(
-        AgentRecipe.create(name="R", stage_prompt_ids={"translation": "prompt-1"})
+    base = AgentWorkspaceState.empty()
+    conversation = base.active()
+    assert conversation is not None
+    active_task = AgentActiveTask.create(
+        task_id="translation-1",
+        kind="translation",
+        conversation_id=conversation.id,
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+    state = (
+        base
+        .with_memories(("keep names",))
+        .add_recipe(
+            AgentRecipe.create(name="R", stage_prompt_ids={"translation": "prompt-1"})
+        )
+        .with_active_task(active_task)
     )
     restored = AgentWorkspaceState.from_dict(state.to_dict())
     assert restored.memories == ("keep names",)
     assert restored.recipes[0].name == "R"
     assert restored.recipes[0].stage_prompt_ids["translation"] == "prompt-1"
+    assert restored.active_task is not None
+    assert restored.active_task.task_id == "translation-1"
 
 
 def test_empty_workspace_has_single_seeded_conversation() -> None:
@@ -104,3 +121,16 @@ def test_from_dict_without_conversations_or_messages_is_empty() -> None:
     state = AgentWorkspaceState.from_dict({"workflow_model_id": None})
     assert state.conversations == ()
     assert state.active_conversation_id is None
+
+
+def test_invalid_active_task_is_ignored_on_load() -> None:
+    state = AgentWorkspaceState.from_dict(
+        {
+            "active_task": {
+                "task_id": "t",
+                "kind": "not-a-task-kind",
+                "conversation_id": "c",
+            }
+        }
+    )
+    assert state.active_task is None
