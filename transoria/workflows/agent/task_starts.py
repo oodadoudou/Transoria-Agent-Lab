@@ -24,6 +24,7 @@ from transoria.bridge.task_service import (
     _require_distinct_translation_folders,
     _require_input_with_supported_files,
 )
+from transoria.formats.scanner import scan_input_directory
 from transoria.model_profiles import ModelProfileStore
 from transoria.prompts import PromptKind, PromptPresetStore
 from transoria.settings import SettingsStore
@@ -93,6 +94,7 @@ def start_agent_task(
             settings_store=settings_store,
             profile_store=profile_store,
             cache_root=cache_root,
+            request_id=request_id,
         )
         return task_service.start_translation_with_config(
             config,
@@ -112,6 +114,7 @@ def _build_translation_config(
     settings_store: SettingsStore,
     profile_store: ModelProfileStore,
     cache_root: Path,
+    request_id: str,
 ) -> TranslationConfig:
     settings = settings_store.load_all()
     translation = settings.translation
@@ -119,6 +122,11 @@ def _build_translation_config(
     _require_input_with_supported_files(input_dir, field="input_dir")
     output_dir = _ensure_output_dir(_required_str(payload, "output_dir"), field="output_dir")
     _require_distinct_translation_folders(input_dir, output_dir)
+    input_dir = _prepare_translation_input(
+        input_dir=input_dir,
+        cache_root=cache_root,
+        request_id=request_id,
+    )
     source_language = _coerce_language(
         _required_str(payload, "source_language"),
         field="source_language",
@@ -402,6 +410,61 @@ def _prepare_glossary_review_input(
     shutil.copy2(source_xlsx, xlsx_path)
     shutil.copy2(source_refs, refs_path)
     return review_input_dir, xlsx_path, (refs_path,)
+
+
+def _prepare_translation_input(
+    *,
+    input_dir: Path,
+    cache_root: Path,
+    request_id: str,
+) -> Path:
+    documents = scan_input_directory(input_dir)
+    source_documents = [
+        document
+        for document in documents
+        if not _is_generated_translation_input(document.relative_path)
+    ]
+    if len(source_documents) == len(documents):
+        return input_dir
+    if not source_documents:
+        raise BridgeError.invalid_argument(
+            "input_dir contains only generated task artifacts, not source novel files.",
+            field="input_dir",
+            details={"input_dir": str(input_dir)},
+        )
+    staging_dir = (
+        cache_root
+        / "agent_lab"
+        / "translation_inputs"
+        / _safe_cache_token(request_id)
+    )
+    try:
+        staging_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise BridgeError.conflict(
+            "agent translation input cache already exists.",
+            details={"input_dir": str(staging_dir)},
+        ) from exc
+    for document in source_documents:
+        target = staging_dir / document.relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(document.path, target)
+    return staging_dir
+
+
+def _is_generated_translation_input(relative_path: Path) -> bool:
+    name = relative_path.name
+    stem = relative_path.stem
+    suffix = relative_path.suffix.lower()
+    if suffix not in {".epub", ".txt"}:
+        return True
+    if name == "translation-failed-subtasks.txt":
+        return True
+    if stem.endswith("-Glossary-references"):
+        return True
+    if stem.endswith("-zh") or "-zh-" in stem:
+        return True
+    return False
 
 
 def _require_existing_artifact_file(

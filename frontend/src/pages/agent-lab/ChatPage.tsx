@@ -53,6 +53,7 @@ export function ChatPage() {
   const [processExpanded, setProcessExpanded] = useState(false);
   const [adjustingDraft, setAdjustingDraft] = useState(false);
   const [draftAdjustment, setDraftAdjustment] = useState("");
+  const [draftConfirmed, setDraftConfirmed] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const [expandedMessages, setExpandedMessages] = useState<ReadonlySet<string>>(
@@ -104,6 +105,10 @@ export function ChatPage() {
     });
   }, [busy, workspace?.messages.length, workspace?.pending_draft?.id]);
 
+  useEffect(() => {
+    setDraftConfirmed(false);
+  }, [workspace?.pending_draft?.id]);
+
   const sendText = async (rawText: string, restoreOnError = false) => {
     const text = rawText.trim();
     if (!text) return;
@@ -151,9 +156,10 @@ export function ChatPage() {
   };
 
   const applyDraft = () => {
-    if (!workspace?.pending_draft) return;
+    if (!workspace?.pending_draft || !draftConfirmed) return;
     setAdjustingDraft(false);
     setDraftAdjustment("");
+    setDraftConfirmed(false);
     void run(() => agentBridge.applyDraft(workspace.pending_draft!.id));
   };
 
@@ -622,10 +628,27 @@ export function ChatPage() {
                 <h3>{workspace.pending_draft.title}</h3>
                 <p>{workspace.pending_draft.summary}</p>
               </div>
+              <DraftConfirmationChecklist draft={workspace.pending_draft} />
               <div className={styles.payloadLabel}>{t.draftPayload}</div>
               <DraftPreview draft={workspace.pending_draft} />
+              <div className={styles.draftConfirmBox}>
+                <label className={styles.draftConfirmControl}>
+                  <input
+                    type="checkbox"
+                    checked={draftConfirmed}
+                    disabled={busy}
+                    onChange={(event) => setDraftConfirmed(event.target.checked)}
+                  />
+                  <span>我已检查草案内容，授权 Agent 执行这些动作。</span>
+                </label>
+                <p>
+                  {!draftConfirmed
+                    ? "勾选后才能应用；未勾选、放弃或调整都不会写入配置或启动任务。"
+                    : "已确认。点击「应用」后会按草案内容执行。"}
+                </p>
+              </div>
               <div className={styles.actions}>
-                <Pill disabled={busy} onClick={applyDraft}>
+                <Pill disabled={busy || !draftConfirmed} onClick={applyDraft}>
                   {t.applyDraft}
                 </Pill>
                 <Pill variant="ghost" disabled={busy} onClick={discardDraft}>
@@ -1015,6 +1038,59 @@ function DraftPreview({ draft }: { draft: AgentActionDraft }) {
       <DraftFields payload={draft.payload} />
       <RawDraftDetails payload={draft.payload} />
     </div>
+  );
+}
+
+function DraftConfirmationChecklist({ draft }: { draft: AgentActionDraft }) {
+  const rows = draftConfirmationRows(draft);
+  return (
+    <div className={styles.draftChecklist} aria-label="草案确认要点">
+      {rows.map((row) => (
+        <div key={row} className={styles.draftChecklistRow}>
+          <span className={styles.draftCheckMark} aria-hidden="true" />
+          <span>{row}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function draftConfirmationRows(draft: AgentActionDraft): string[] {
+  const rows: string[] = [];
+  const actionCount = draftActionCount(draft);
+  if (actionCount > 1) {
+    rows.push(`多步草案：包含 ${actionCount} 个动作，会按显示顺序执行。`);
+  }
+  if (draftStartsTask(draft)) {
+    rows.push("任务启动：点击「应用」后才会启动任务，并在对应 dashboard 显示进度。");
+  } else {
+    rows.push("配置写入：点击「应用」后才会保存；未应用前不会改动配置。");
+  }
+  rows.push("安全确认：点击「放弃」不会写入；点击「调整」会让 Agent 重写草案。");
+  return rows;
+}
+
+function draftActionCount(draft: AgentActionDraft): number {
+  if (draft.kind !== "compound_config_update") return 1;
+  const actions = draft.payload.actions;
+  return Array.isArray(actions) ? actions.filter(isRecord).length : 1;
+}
+
+function draftStartsTask(draft: AgentActionDraft): boolean {
+  if (isStartTaskKind(draft.kind)) return true;
+  if (draft.kind !== "compound_config_update") return false;
+  const actions = draft.payload.actions;
+  if (!Array.isArray(actions)) return false;
+  return actions.some(
+    (action) => isRecord(action) && isStartTaskKind(String(action.kind || "")),
+  );
+}
+
+function isStartTaskKind(kind: string): boolean {
+  return (
+    kind === "start_glossary_task" ||
+    kind === "start_glossary_review_task" ||
+    kind === "start_translation_task"
   );
 }
 

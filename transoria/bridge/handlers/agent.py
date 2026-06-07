@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from secrets import token_hex
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from transoria.agent.configuration_agent import (
     AGENT_REPAIR_SYSTEM_PROMPT,
@@ -45,7 +45,14 @@ from transoria.domain import TaskKind, TaskStatus
 from transoria.llm.client import ChatRequest, ChatResponse, LlmClient, LlmRequestError
 from transoria.llm.config import ModelConfig, ProviderFormat, ThinkingLevel
 from transoria.model_profiles import ModelProfileStore
-from transoria.prompts import PromptKind, PromptPreset, PromptPresetStore
+from transoria.prompts import (
+    DEFAULT_GLOSSARY_PRESET_ID,
+    DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
+    DEFAULT_TRANSLATION_PRESET_ID,
+    PromptKind,
+    PromptPreset,
+    PromptPresetStore,
+)
 from transoria.runtime.cache import TaskNotFoundError
 from transoria.settings import SettingsStore
 from transoria.workflows.agent.task_starts import start_agent_task
@@ -56,6 +63,12 @@ _PROMPT_KIND_BY_SLOT = {
     "translation": PromptKind.TRANSLATION,
     "term_extract": PromptKind.GLOSSARY,
     "term_review": PromptKind.GLOSSARY_REVIEW,
+}
+
+_DEFAULT_PROMPT_ID_BY_SLOT = {
+    "translation": DEFAULT_TRANSLATION_PRESET_ID,
+    "term_extract": DEFAULT_GLOSSARY_PRESET_ID,
+    "term_review": DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
 }
 
 _PROMPT_KIND_ALIASES = {
@@ -633,6 +646,7 @@ def _generate_reply(
             conversation_context=conversation_context,
             state=state,
             current_state=current_state,
+            cache_root=cache_root,
         )
         if direct is None:
             direct = _direct_glossary_review_response(
@@ -640,6 +654,7 @@ def _generate_reply(
                 conversation_context=conversation_context,
                 state=state,
                 current_state=current_state,
+                cache_root=cache_root,
             )
         if direct is None:
             direct = _direct_glossary_extraction_response(
@@ -647,6 +662,7 @@ def _generate_reply(
                 conversation_context=conversation_context,
                 state=state,
                 current_state=current_state,
+                cache_root=cache_root,
             )
         if direct is None:
             direct = _direct_compound_config_response(
@@ -656,11 +672,28 @@ def _generate_reply(
                 cache_root=cache_root,
             )
         if direct is None:
+            direct = _direct_prompt_quality_response(
+                user_message=user_message,
+                state=state,
+                cache_root=cache_root,
+            )
+        if direct is None:
             direct = _direct_prompt_preset_response(user_message=user_message)
+        if direct is None:
+            direct = _direct_vague_model_profile_guidance_response(
+                user_message=user_message,
+                profile_store=profile_store,
+            )
         if direct is None:
             direct = _direct_model_profile_copy_response(
                 user_message=user_message,
                 conversation_context=conversation_context,
+                profile_store=profile_store,
+            )
+        if direct is None:
+            direct = _direct_model_upgrade_response(
+                user_message=user_message,
+                state=state,
                 profile_store=profile_store,
             )
     if direct is not None:
@@ -1073,6 +1106,89 @@ def _direct_prompt_preset_response(
     )
 
 
+def _direct_prompt_quality_response(
+    *,
+    user_message: str,
+    state: AgentWorkspaceState,
+    cache_root: Path,
+) -> tuple[str, AgentActionDraft | None] | None:
+    if not _looks_like_prompt_quality_request(user_message):
+        return None
+    prompt_kind = _quality_prompt_kind(user_message)
+    issues = _quality_issue_markers(user_message)
+    if not issues:
+        return (
+            (
+                "我可以帮你优化 Prompt，但还缺少可操作的问题描述。"
+                "请贴一小段原文/译文，或说明具体问题类型，例如源文残留、"
+                "人名不一致、术语漂移、文风太直译、漏翻或翻译腔。"
+            ),
+            None,
+        )
+
+    source = _selected_prompt_for_kind(
+        prompt_kind,
+        state=state,
+        cache_root=cache_root,
+    )
+    addendum = _quality_prompt_addendum(
+        issues=issues,
+        user_message=user_message,
+    )
+    label = _prompt_kind_label(prompt_kind)
+    if source is not None and not source.is_system:
+        system_prompt = f"{source.system_prompt.rstrip()}\n\n{addendum}"
+        draft = AgentActionDraft.create(
+            kind="update_prompt_preset",
+            title=f"优化{source.name}",
+            summary=f"在现有 {label} Prompt「{source.name}」中追加本次质量修正规则。",
+            payload={
+                "id": source.id,
+                "patch": {
+                    "system_prompt": system_prompt,
+                    "description": source.description
+                    or f"由 Agent Lab 根据质量反馈优化的{label} Prompt。",
+                },
+            },
+        )
+        return (
+            (
+                f"我会在当前 {label} Prompt「{source.name}」里追加质量修正规则，"
+                "解决你指出的问题。请先检查草案，确认后才会写入配置。"
+            ),
+            draft,
+        )
+
+    base_prompt = (
+        source.system_prompt
+        if source is not None
+        else _build_prompt_body_from_request(
+            prompt_kind=prompt_kind,
+            user_request=user_message,
+        )
+    )
+    name = _quality_prompt_name(user_message, prompt_kind, source)
+    draft = AgentActionDraft.create(
+        kind="create_prompt_preset",
+        title=f"创建{name}",
+        summary=f"基于当前 {label} Prompt 创建可编辑副本，并加入本次质量修正规则。",
+        payload={
+            "kind": prompt_kind.value,
+            "name": name,
+            "description": f"由 Agent Lab 根据质量反馈创建的{label} Prompt。",
+            "system_prompt": f"{base_prompt.rstrip()}\n\n{addendum}",
+            "enabled": True,
+        },
+    )
+    return (
+        (
+            f"当前选中的 {label} Prompt 是系统预设或尚未选择可编辑预设，"
+            f"我会创建一套新的「{name}」供你确认保存。"
+        ),
+        draft,
+    )
+
+
 def _has_prompt_creation_requirements(text: str) -> bool:
     return any(
         marker in text
@@ -1141,6 +1257,117 @@ def _prompt_kind_label(kind: PromptKind) -> str:
         PromptKind.GLOSSARY: "术语提取",
         PromptKind.GLOSSARY_REVIEW: "术语审查",
     }[kind]
+
+
+def _looks_like_prompt_quality_request(text: str) -> bool:
+    normalized = text.lower()
+    if "prompt" not in normalized and "提示词" not in text:
+        return False
+    if not any(marker in text for marker in ("改", "修改", "优化", "调整", "重写", "重新设计")):
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "效果不好",
+            "质量不好",
+            "不好",
+            "问题",
+            "翻译腔",
+            "不自然",
+            "源文残留",
+            "原文残留",
+            "漏翻",
+            "错译",
+            "直译",
+            "文风",
+            "人名",
+            "术语",
+            "一致",
+            "低置信",
+            "质量",
+        )
+    )
+
+
+def _quality_prompt_kind(text: str) -> PromptKind:
+    try:
+        return _coerce_prompt_kind(None, fallback_text=text)
+    except BridgeError:
+        return PromptKind.TRANSLATION
+
+
+def _quality_issue_markers(text: str) -> list[str]:
+    candidates = (
+        ("源文残留", ("源文残留", "原文残留", "韩文残留", "日文残留", "英文残留")),
+        ("人名不一致", ("人名不一致", "名字不一致", "称呼不一致", "人名")),
+        ("术语不一致", ("术语不一致", "术语漂移", "术语")),
+        ("文风不自然", ("文风不自然", "不自然", "翻译腔", "太直译", "直译", "文风")),
+        ("漏翻", ("漏翻", "缺句", "少翻")),
+        ("错译", ("错译", "误译", "理解错")),
+        ("低置信度", ("低置信", "不确定")),
+        ("长度或分段异常", ("长度", "分段", "行数")),
+    )
+    issues: list[str] = []
+    for label, markers in candidates:
+        if any(marker in text for marker in markers):
+            issues.append(label)
+    if issues == ["术语不一致"] and "术语" in text and "翻译" not in text:
+        return []
+    return issues
+
+
+def _selected_prompt_for_kind(
+    kind: PromptKind,
+    *,
+    state: AgentWorkspaceState,
+    cache_root: Path,
+) -> PromptPreset | None:
+    slot = _prompt_slot_for_kind(kind)
+    prompt_id = state.stage_prompt_ids.get(slot) or _DEFAULT_PROMPT_ID_BY_SLOT.get(slot)
+    if not prompt_id:
+        return None
+    for preset in _prompt_store_for(cache_root, kind).load():
+        if preset.id == prompt_id:
+            return preset
+    return None
+
+
+def _prompt_slot_for_kind(kind: PromptKind) -> str:
+    for slot, prompt_kind in _PROMPT_KIND_BY_SLOT.items():
+        if prompt_kind == kind:
+            return slot
+    raise BridgeError.invalid_argument(
+        f"unsupported prompt kind: {kind.value}",
+        field="kind",
+    )
+
+
+def _quality_prompt_addendum(*, issues: Sequence[str], user_message: str) -> str:
+    issue_text = "、".join(dict.fromkeys(issues))
+    return "\n".join(
+        (
+            "本次质量优化要求：",
+            f"- 重点修正：{issue_text}。",
+            "- 处理前先识别上下文、人名、称呼、术语和叙事视角，避免只逐句直译。",
+            "- 输出时优先保持原文信息完整和分段稳定，不新增原文不存在的情节、心理解释或评价。",
+            "- 对人名、称呼、组织、作品内专有名词保持一致；不确定时保留可校对的稳定译名。",
+            "- 主动规避源语言残留、漏翻、重复漂移和明显翻译腔。",
+            f"- 用户反馈原文：{user_message.strip()}",
+        )
+    )
+
+
+def _quality_prompt_name(
+    text: str,
+    kind: PromptKind,
+    source: PromptPreset | None,
+) -> str:
+    explicit = _extract_prompt_create_name(text)
+    if explicit:
+        return explicit
+    base = source.name if source is not None else f"{_prompt_kind_label(kind)} Prompt"
+    name = f"{base} - 质量优化"
+    return name[:_MAX_RECIPE_NAME_LENGTH]
 
 
 def _looks_like_direct_compound_config_request(text: str) -> bool:
@@ -1253,12 +1480,91 @@ def _direct_model_profile_copy_response(
     )
 
 
+def _direct_vague_model_profile_guidance_response(
+    *,
+    user_message: str,
+    profile_store: ModelProfileStore,
+) -> tuple[str, AgentActionDraft | None] | None:
+    if not _looks_like_vague_model_profile_request(user_message):
+        return None
+    usable_profiles = [
+        profile
+        for profile in profile_store.load()
+        if profile.api_keys and not _model_profile_has_placeholder_fields(profile)
+    ]
+    examples = ""
+    if usable_profiles:
+        labels = "、".join(profile.display_name for profile in usable_profiles[:5])
+        examples = f"\n\n当前可以复用的已有模型配置：{labels}。"
+    return (
+        (
+            "我可以帮你配置模型，但不能替你猜 provider model_id、base_url 或 API key。"
+            "如果你不知道具体信息，请选择一种方式：\n"
+            "1. 说“按照某个已有模型复制一个”，并告诉我要改成的 provider model_id；\n"
+            "2. 直接提供接口类型、base_url、provider model_id 和 API key，我会生成确认草案；\n"
+            "3. 如果只是想提高质量，可以让我先查看现有模型，切换到已经配置好的更强模型。\n\n"
+            "任何写入都会先生成草案，API key 在预览里会遮罩。"
+            f"{examples}"
+        ),
+        None,
+    )
+
+
+def _direct_model_upgrade_response(
+    *,
+    user_message: str,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+) -> tuple[str, AgentActionDraft | None] | None:
+    if not _looks_like_model_upgrade_request(user_message):
+        return None
+    target = _find_existing_upgrade_profile(
+        user_message,
+        state=state,
+        profile_store=profile_store,
+    )
+    if target is None:
+        return (
+            (
+                "我理解你想换成更强的模型配置，但当前模型库里没有唯一可复用的更高质量配置。"
+                "请告诉我要使用的准确 provider model_id，或者先在模型页添加一个可用模型；"
+                "如果你只是想先用现有配置，我也可以帮你把当前流程切到已有模型。"
+            ),
+            None,
+        )
+
+    stage_models = {slot: target.id for slot in MODEL_SLOTS}
+    payload: dict[str, object] = {"stage_model_ids": stage_models}
+    current_workflow = (
+        profile_store.get(state.workflow_model_id) if state.workflow_model_id else None
+    )
+    if current_workflow is None or _is_same_model_family(current_workflow, target):
+        payload["workflow_model_id"] = target.id
+    draft = AgentActionDraft.create(
+        kind="update_workspace",
+        title=f"切换到更强模型 {target.display_name}",
+        summary=(
+            f"将翻译、术语提取和术语审查阶段切换到现有模型 {target.display_name}。"
+            "如果当前工作模型属于同一模型系列，也会同步切换工作模型。"
+        ),
+        payload=payload,
+    )
+    return (
+        (
+            f"我在现有模型库里找到了更适合质量测试的模型 {target.display_name}。"
+            "我不会直接保存；下面是把翻译流程各阶段切换到这个模型的确认草案。"
+        ),
+        draft,
+    )
+
+
 def _direct_glossary_extraction_response(
     *,
     user_message: str,
     conversation_context: list[Mapping[str, object]],
     state: AgentWorkspaceState,
     current_state: Mapping[str, object],
+    cache_root: Path,
 ) -> tuple[str, AgentActionDraft | None] | None:
     if _looks_like_glossary_review_request(user_message):
         return None
@@ -1325,6 +1631,23 @@ def _direct_glossary_extraction_response(
         payload=payload,
     )
     if not completeness.complete:
+        dumb_start = _draft_start_with_default_stage_config(
+            draft_kind="start_glossary_task",
+            payload=payload,
+            state=state,
+            completeness_missing=completeness.missing,
+            cache_root=cache_root,
+            title="补齐术语提取配置并启动任务",
+            start_title="启动术语提取",
+            start_summary="使用补齐后的术语提取模型和 Prompt，从指定目录提取术语表。",
+            reply=(
+                "我可以按傻瓜模式处理：先用当前工作模型补齐术语提取模型，"
+                "用内置默认术语提取 Prompt 补齐缺失项，然后再启动术语提取任务。"
+                "下面是一个组合草案，只有点击「应用」后才会写入工作区配置并启动任务。"
+            ),
+        )
+        if dumb_start is not None:
+            return dumb_start
         missing = "、".join(completeness.missing)
         return (
             f"我理解你想提取术语，但当前术语提取任务配置还不完整：{missing}。请先补齐对应模型、Prompt 或语言设置。",
@@ -1352,6 +1675,7 @@ def _direct_glossary_review_response(
     conversation_context: list[Mapping[str, object]],
     state: AgentWorkspaceState,
     current_state: Mapping[str, object],
+    cache_root: Path,
 ) -> tuple[str, AgentActionDraft | None] | None:
     if not (
         _looks_like_glossary_review_request(user_message)
@@ -1386,6 +1710,23 @@ def _direct_glossary_review_response(
         payload=payload,
     )
     if not completeness.complete:
+        dumb_start = _draft_start_with_default_stage_config(
+            draft_kind="start_glossary_review_task",
+            payload=payload,
+            state=state,
+            completeness_missing=completeness.missing,
+            cache_root=cache_root,
+            title="补齐术语审查配置并启动任务",
+            start_title="启动术语审查",
+            start_summary=f"使用术语提取任务 {task_id} 的术语表和参考文本启动术语审查。",
+            reply=(
+                "我可以先用当前工作模型补齐术语审查模型，"
+                "用内置默认术语审查 Prompt 补齐缺失项，然后再启动术语审查任务。"
+                "下面是一个组合草案，只有点击「应用」后才会写入工作区配置并启动任务。"
+            ),
+        )
+        if dumb_start is not None:
+            return dumb_start
         missing = "、".join(completeness.missing)
         return (
             f"我理解你想审查术语，但当前术语审查任务配置还不完整：{missing}。请先补齐对应模型、Prompt 或语言设置。",
@@ -1412,6 +1753,7 @@ def _direct_translation_response(
     conversation_context: list[Mapping[str, object]],
     state: AgentWorkspaceState,
     current_state: Mapping[str, object],
+    cache_root: Path,
 ) -> tuple[str, AgentActionDraft | None] | None:
     followup_request = _looks_like_translation_after_review_followup_request(
         user_message,
@@ -1426,6 +1768,9 @@ def _direct_translation_response(
     input_dir, output_dir, _ = _extract_glossary_task_dirs(user_message)
     if not input_dir:
         input_dir, output_dir, _ = _extract_glossary_task_dirs(combined_text)
+    same_dir_requested = _looks_like_same_directory_output(
+        user_message
+    ) or _looks_like_same_directory_output(combined_text)
     if not input_dir:
         if not _extract_absolute_path_candidates(combined_text):
             if followup_request:
@@ -1438,14 +1783,31 @@ def _direct_translation_response(
             "我理解你想启动翻译。请提供 input 目录和一个独立的 output 目录；翻译输出不能默认写回输入目录。",
             None,
         )
+    output_adjustment_note = ""
+    if not output_dir and same_dir_requested:
+        output_dir = _safe_translation_output_dir(input_dir)
+        output_adjustment_note = (
+            f"你提到同目录输出；但翻译不能写回 input，我已在草案中改为安全同级输出目录：{output_dir}。"
+        )
     if not output_dir:
         return (
             "我理解你想启动翻译，但还缺 output 目录。翻译输出需要使用独立目录，避免覆盖源文件。",
             None,
         )
     if input_dir.rstrip("/") == output_dir.rstrip("/"):
+        if same_dir_requested:
+            output_dir = _safe_translation_output_dir(input_dir)
+            output_adjustment_note = (
+                f"你提到同目录输出；但翻译不能写回 input，我已在草案中改为安全同级输出目录：{output_dir}。"
+            )
+        else:
+            return (
+                "我理解你想启动翻译，但 input 和 output 目录不能相同。请提供一个独立的 output 目录。",
+                None,
+            )
+    if _is_output_inside_input(input_dir, output_dir):
         return (
-            "我理解你想启动翻译，但 input 和 output 目录不能相同。请提供一个独立的 output 目录。",
+            "我理解你想启动翻译，但 output 目录不能放在 input 目录里面，否则译后文件会被下一次扫描当成源文。请提供一个独立的 output 目录。",
             None,
         )
     source_language = _extract_source_language(user_message) or _settings_default_value(
@@ -1488,6 +1850,24 @@ def _direct_translation_response(
         payload=payload,
     )
     if not completeness.complete:
+        dumb_start = _draft_start_with_default_stage_config(
+            draft_kind="start_translation_task",
+            payload=payload,
+            state=state,
+            completeness_missing=completeness.missing,
+            cache_root=cache_root,
+            title="补齐翻译配置并启动任务",
+            start_title="启动翻译",
+            start_summary="使用补齐后的翻译模型和 Prompt 翻译指定目录。",
+            reply=(
+                f"{output_adjustment_note}"
+                "我可以按当前工作区的傻瓜模式处理：先用当前工作模型补齐翻译模型，"
+                "用内置默认翻译 Prompt 补齐缺失项，然后再启动翻译任务。"
+                "下面是一个组合草案，只有点击「应用」后才会写入工作区配置并启动任务。"
+            ),
+        )
+        if dumb_start is not None:
+            return dumb_start
         missing = "、".join(completeness.missing)
         return (
             f"我理解你想启动翻译，但当前翻译任务配置还不完整：{missing}。请先补齐对应模型、Prompt 或语言设置。",
@@ -1509,10 +1889,77 @@ def _direct_translation_response(
     return (
         (
             "我已准备好翻译任务草案。"
+            f"{output_adjustment_note}"
             f"{glossary_note}请确认后再启动；本次目录和语言只作为任务覆盖项，不会写入手动设置。"
         ),
         draft,
     )
+
+
+def _draft_start_with_default_stage_config(
+    *,
+    draft_kind: str,
+    payload: Mapping[str, object],
+    state: AgentWorkspaceState,
+    completeness_missing: Sequence[str],
+    cache_root: Path,
+    title: str,
+    start_title: str,
+    start_summary: str,
+    reply: str,
+) -> tuple[str, AgentActionDraft] | None:
+    stage = {
+        "start_glossary_task": "term_extract",
+        "start_glossary_review_task": "term_review",
+        "start_translation_task": "translation",
+    }.get(draft_kind)
+    if stage is None:
+        return None
+
+    missing = set(completeness_missing)
+    model_key = f"stage_model_ids.{stage}"
+    prompt_key = f"stage_prompt_ids.{stage}"
+    if not missing or not missing.issubset({model_key, prompt_key}):
+        return None
+
+    workspace_patch: dict[str, object] = {}
+    if model_key in missing:
+        if not state.workflow_model_id:
+            return None
+        workspace_patch["stage_model_ids"] = {stage: state.workflow_model_id}
+    if prompt_key in missing:
+        prompt_id = _DEFAULT_PROMPT_ID_BY_SLOT.get(stage)
+        if not prompt_id:
+            return None
+        prompt_kind = _PROMPT_KIND_BY_SLOT[stage]
+        presets = _prompt_store_for(cache_root, prompt_kind).load()
+        if not any(preset.id == prompt_id for preset in presets):
+            return None
+        workspace_patch["stage_prompt_ids"] = {stage: prompt_id}
+    if not workspace_patch:
+        return None
+
+    actions: list[dict[str, object]] = [
+        {
+            "kind": "update_workspace",
+            "title": "补齐当前流程阶段配置",
+            "summary": "使用当前工作模型和系统默认 Prompt 补齐本次任务需要的阶段配置。",
+            "payload": workspace_patch,
+        },
+        {
+            "kind": draft_kind,
+            "title": start_title,
+            "summary": start_summary,
+            "payload": dict(payload),
+        },
+    ]
+    draft = AgentActionDraft.create(
+        kind="compound_config_update",
+        title=title,
+        summary="先补齐缺失的阶段模型/Prompt，再启动对应任务。所有动作都会在你点击「应用」后按顺序执行。",
+        payload={"actions": actions},
+    )
+    return reply, draft
 
 
 def _direct_stage_status_response(
@@ -2323,6 +2770,17 @@ def _looks_like_glossary_extraction_request(text: str) -> bool:
             "术语提取",
             "处理术语",
             "处理术语表",
+            "傻瓜术语",
+            "傻瓜式术语",
+            "一键术语",
+            "自动术语",
+            "术语流程",
+            "术语弄一下",
+            "术语搞一下",
+            "把术语弄一下",
+            "把术语搞一下",
+            "弄术语",
+            "搞术语",
             "整理术语",
             "整理术语表",
             "跑术语",
@@ -2447,6 +2905,46 @@ def _infer_sibling_output_dir(text: str, input_dir: str) -> str | None:
     if path.name.lower() != "input":
         return None
     return str(path.parent / "output")
+
+
+def _looks_like_same_directory_output(text: str) -> bool:
+    normalized = text.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "输出和输入放在同一个",
+            "输入和输出放在同一个",
+            "输出和输入同一个",
+            "输入和输出同一个",
+            "输出放同一个",
+            "输出到同一个",
+            "同一个目录",
+            "同一个文件夹",
+            "同一目录",
+            "同一文件夹",
+            "same directory",
+            "same folder",
+        )
+    )
+
+
+def _safe_translation_output_dir(input_dir: str) -> str:
+    path = Path(input_dir).expanduser()
+    name = path.name or "translation"
+    return str(path.parent / f"{name}-translated")
+
+
+def _is_output_inside_input(input_dir: str, output_dir: str) -> bool:
+    try:
+        input_path = Path(input_dir).expanduser().resolve()
+        output_path = Path(output_dir).expanduser().resolve()
+    except OSError:
+        return False
+    try:
+        output_path.relative_to(input_path)
+    except ValueError:
+        return False
+    return input_path != output_path
 
 
 def _extract_labeled_path(text: str, labels: tuple[str, ...]) -> str | None:
@@ -2699,6 +3197,232 @@ def _looks_like_model_profile_copy_continuation(text: str) -> bool:
         )
     )
     return has_confirmation
+
+
+def _looks_like_vague_model_profile_request(text: str) -> bool:
+    normalized = text.lower()
+    if (
+        _looks_like_model_profile_copy_request(text)
+        or _looks_like_model_upgrade_request(text)
+        or _looks_like_translation_task_request(text)
+        or _looks_like_glossary_extraction_request(text)
+        or _looks_like_glossary_review_request(text)
+        or _looks_like_direct_prompt_preset_request(text)
+    ):
+        return False
+    has_model = any(marker in normalized for marker in ("模型", "model", "profile"))
+    has_create_or_config = any(
+        marker in normalized
+        for marker in (
+            "新增",
+            "添加",
+            "加一个",
+            "新建",
+            "创建",
+            "配置",
+            "接入",
+            "add",
+            "create",
+            "configure",
+        )
+    )
+    has_uncertainty = any(
+        marker in normalized
+        for marker in (
+            "不知道",
+            "不清楚",
+            "不会",
+            "不懂",
+            "不了解",
+            "随便",
+            "你帮我",
+            "帮我配",
+            "帮我配置",
+            "不确定",
+        )
+    )
+    has_concrete_connection = any(
+        marker in normalized
+        for marker in (
+            "base_url",
+            "api key",
+            "apikey",
+            "密钥",
+            "provider model_id",
+            "model_id",
+            "模型 id",
+            "模型id",
+            "接口地址",
+        )
+    )
+    return has_model and has_create_or_config and has_uncertainty and not has_concrete_connection
+
+
+def _looks_like_model_upgrade_request(text: str) -> bool:
+    normalized = text.lower()
+    if (
+        _looks_like_model_profile_copy_request(text)
+        or _looks_like_translation_task_request(text)
+        or _looks_like_glossary_extraction_request(text)
+        or _looks_like_glossary_review_request(text)
+        or _looks_like_direct_prompt_preset_request(text)
+    ):
+        return False
+    has_model = any(marker in normalized for marker in ("模型", "model", "profile"))
+    has_quality_intent = any(
+        marker in normalized
+        for marker in (
+            "更厉害",
+            "更强",
+            "更好",
+            "高质量",
+            "高规格",
+            "高级",
+            "pro",
+            "质量",
+            "升级",
+            "换成",
+            "切换",
+            "better",
+            "stronger",
+            "upgrade",
+        )
+    )
+    has_agent_help = any(
+        marker in normalized
+        for marker in (
+            "不知道",
+            "不清楚",
+            "不会",
+            "你帮我",
+            "帮我看",
+            "看看",
+            "帮我",
+            "配置",
+            "修改方案",
+            "方案",
+        )
+    )
+    return has_model and has_quality_intent and has_agent_help
+
+
+def _find_existing_upgrade_profile(
+    user_message: str,
+    *,
+    state: AgentWorkspaceState,
+    profile_store: ModelProfileStore,
+) -> ModelConfig | None:
+    requested_families = _model_family_tokens_from_text(user_message)
+    current_profiles = _current_workspace_profiles(
+        state,
+        profile_store=profile_store,
+    )
+    if not requested_families:
+        for profile in current_profiles:
+            requested_families.update(_model_family_tokens_for_profile(profile))
+
+    comparable_current_profiles = [
+        profile
+        for profile in current_profiles
+        if not requested_families
+        or (_model_family_tokens_for_profile(profile) & requested_families)
+    ]
+    current_best = max(
+        (_model_quality_score(profile) for profile in comparable_current_profiles),
+        default=-100,
+    )
+    candidates: list[tuple[int, str, ModelConfig]] = []
+    for profile in profile_store.load():
+        if not profile.api_keys:
+            continue
+        families = _model_family_tokens_for_profile(profile)
+        if requested_families and not (families & requested_families):
+            continue
+        score = _model_quality_score(profile)
+        if score <= current_best and requested_families:
+            continue
+        candidates.append((score, profile.display_name.lower(), profile))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    best_score = candidates[0][0]
+    best = [profile for score, _, profile in candidates if score == best_score]
+    if len(best) != 1:
+        return None
+    if best_score < 10:
+        return None
+    return best[0]
+
+
+def _current_workspace_profiles(
+    state: AgentWorkspaceState,
+    *,
+    profile_store: ModelProfileStore,
+) -> list[ModelConfig]:
+    ids = [state.workflow_model_id, *state.stage_model_ids.values()]
+    profiles: list[ModelConfig] = []
+    seen: set[str] = set()
+    for profile_id in ids:
+        if not profile_id or profile_id in seen:
+            continue
+        profile = profile_store.get(profile_id)
+        if profile is None:
+            continue
+        seen.add(profile.id)
+        profiles.append(profile)
+    return profiles
+
+
+def _is_same_model_family(left: ModelConfig, right: ModelConfig) -> bool:
+    return bool(
+        _model_family_tokens_for_profile(left) & _model_family_tokens_for_profile(right)
+    )
+
+
+def _model_family_tokens_for_profile(profile: ModelConfig) -> set[str]:
+    return _model_family_tokens_from_text(
+        " ".join((profile.id, profile.display_name, profile.model_id))
+    )
+
+
+def _model_family_tokens_from_text(text: str) -> set[str]:
+    normalized = text.lower()
+    aliases = {
+        "deepseek": ("deepseek", "deep seek", "深度求索"),
+        "gemini": ("gemini", "google"),
+        "claude": ("claude", "anthropic"),
+        "gpt": ("gpt", "openai", "chatgpt"),
+        "qwen": ("qwen", "通义", "千问"),
+        "kimi": ("kimi", "moonshot"),
+    }
+    result: set[str] = set()
+    for family, markers in aliases.items():
+        if any(marker in normalized for marker in markers):
+            result.add(family)
+    return result
+
+
+def _model_quality_score(profile: ModelConfig) -> int:
+    label = f"{profile.id} {profile.display_name} {profile.model_id}".lower()
+    score = 0
+    if "pro" in label:
+        score += 40
+    if "reasoner" in label or "reasoning" in label:
+        score += 36
+    if "opus" in label:
+        score += 34
+    if "sonnet" in label:
+        score += 24
+    if "max" in label or "ultra" in label:
+        score += 18
+    if profile.thinking_level is not ThinkingLevel.OFF:
+        score += 8
+    if "flash" in label:
+        score -= 16
+    if any(marker in label for marker in ("mini", "lite", "nano", "haiku")):
+        score -= 20
+    return score
 
 
 def _model_profile_copy_payload(

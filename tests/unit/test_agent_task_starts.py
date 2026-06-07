@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from transoria.agent.schemas import AgentWorkspaceState
+from transoria.bridge.errors import BridgeError
 from transoria.bridge.handlers.settings import default_store
 from transoria.domain import TaskKind, TaskStatus
 from transoria.llm.config import ModelConfig, ProviderFormat
@@ -139,6 +142,100 @@ def test_start_translation_uses_chat_payload_without_writing_settings(
     settings = default_store(tmp_path).load_all()
     assert settings.translation.input_folder == ""
     assert settings.translation.output_folder == ""
+
+
+def test_start_translation_stages_dirty_agent_input_without_generated_artifacts(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    input_dir = tmp_path / "novel"
+    output_dir = tmp_path / "translated"
+    nested_dir = input_dir / "volume"
+    nested_dir.mkdir(parents=True)
+    (input_dir / "book.epub").write_bytes(b"epub")
+    (nested_dir / "chapter.txt").write_text("source", encoding="utf-8")
+    (input_dir / "book-Glossary-references.txt").write_text(
+        "generated glossary references",
+        encoding="utf-8",
+    )
+    (input_dir / "book-zh.epub").write_bytes(b"translated")
+    (input_dir / "translation-failed-subtasks.txt").write_text(
+        "generated failed subtasks",
+        encoding="utf-8",
+    )
+    service = _FakeStartOnlyTaskService()
+    state = AgentWorkspaceState.empty().with_config(
+        stage_model_ids={"translation": "profile-agent"},
+        stage_prompt_ids={"translation": DEFAULT_TRANSLATION_PRESET_ID},
+    )
+
+    result = start_agent_task(
+        draft_kind="start_translation_task",
+        payload={
+            "input_dir": str(input_dir),
+            "output_dir": str(output_dir),
+            "source_language": "kr",
+            "target_language": "zh",
+        },
+        state=state,
+        task_service=service,  # type: ignore[arg-type]
+        settings_store=default_store(tmp_path),
+        profile_store=ModelProfileStore.from_cache_root(tmp_path),
+        cache_root=tmp_path,
+        request_id="draft-dirty-translation",
+    )
+
+    assert result["task_id"] == "translation-1"
+    assert service.started_translation_config is not None
+    staged_input = service.started_translation_config.input_dir
+    assert staged_input == (
+        tmp_path / "agent_lab" / "translation_inputs" / "draft-dirty-translation"
+    )
+    assert (staged_input / "book.epub").read_bytes() == b"epub"
+    assert (staged_input / "volume" / "chapter.txt").read_text(
+        encoding="utf-8"
+    ) == "source"
+    assert not (staged_input / "book-Glossary-references.txt").exists()
+    assert not (staged_input / "book-zh.epub").exists()
+    assert not (staged_input / "translation-failed-subtasks.txt").exists()
+
+
+def test_start_translation_rejects_input_with_only_generated_artifacts(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    input_dir = tmp_path / "novel"
+    output_dir = tmp_path / "translated"
+    input_dir.mkdir()
+    (input_dir / "book-Glossary-references.txt").write_text(
+        "generated glossary references",
+        encoding="utf-8",
+    )
+    service = _FakeStartOnlyTaskService()
+    state = AgentWorkspaceState.empty().with_config(
+        stage_model_ids={"translation": "profile-agent"},
+        stage_prompt_ids={"translation": DEFAULT_TRANSLATION_PRESET_ID},
+    )
+
+    with pytest.raises(BridgeError) as exc_info:
+        start_agent_task(
+            draft_kind="start_translation_task",
+            payload={
+                "input_dir": str(input_dir),
+                "output_dir": str(output_dir),
+                "source_language": "kr",
+                "target_language": "zh",
+            },
+            state=state,
+            task_service=service,  # type: ignore[arg-type]
+            settings_store=default_store(tmp_path),
+            profile_store=ModelProfileStore.from_cache_root(tmp_path),
+            cache_root=tmp_path,
+            request_id="draft-generated-only",
+        )
+
+    assert "only generated task artifacts" in str(exc_info.value)
+    assert service.started_translation_config is None
 
 
 def test_start_glossary_uses_chat_payload_without_writing_settings(
