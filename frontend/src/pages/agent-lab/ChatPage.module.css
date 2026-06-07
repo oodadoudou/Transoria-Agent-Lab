@@ -380,7 +380,7 @@
 :global([data-theme='dark']) .chatMain,
 :global(:root[data-theme='dark']) .chatMain {
   border-color: var(--agent-chat-border);
-  background: var(--canvas);
+  background: var(--agent-chat-main);
   color: var(--ink);
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 3%),
@@ -431,6 +431,82 @@
   cursor: pointer;
 }
 
+.activeTaskBar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--agent-chat-control);
+  padding: 9px 10px;
+}
+
+.activeTaskMain {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.activeTaskBadge {
+  flex: 0 0 auto;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--agent-chat-main);
+  color: var(--muted);
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.activeTaskMain strong {
+  display: block;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.activeTaskMain p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.activeTaskButton {
+  flex: 0 0 auto;
+  min-height: 32px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink);
+  padding: 0 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.activeTaskButton:hover {
+  border-color: var(--accent, #5b6cff);
+}
+
+:global(body[data-theme='dark']) .activeTaskBar,
+:global(body[data-theme='dark']) .activeTaskBadge,
+:global(body[data-theme='dark']) .activeTaskButton,
+:global([data-theme='dark']) .activeTaskBar,
+:global([data-theme='dark']) .activeTaskBadge,
+:global([data-theme='dark']) .activeTaskButton,
+:global(:root[data-theme='dark']) .activeTaskBar,
+:global(:root[data-theme='dark']) .activeTaskBadge,
+:global(:root[data-theme='dark']) .activeTaskButton {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
+}
+
 .messages {
   display: flex;
   flex: 1 1 auto;
@@ -447,7 +523,7 @@
 :global(body[data-theme='dark']) .messages,
 :global([data-theme='dark']) .messages,
 :global(:root[data-theme='dark']) .messages {
-  background: var(--canvas);
+  background: var(--agent-chat-stream);
 }
 
 .messagesEnd {
@@ -719,42 +795,62 @@
   background: var(--agent-chat-control);
 }
 
-.draftConfirmControl {
-  display: inline-flex;
-  gap: 8px;
-  align-items: center;
+.draftConfirmBox {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-top: 10px;
   border: 1px solid var(--hairline);
-  border-radius: 999px;
+  border-radius: 8px;
   background: var(--agent-chat-control);
-  color: var(--ink);
-  padding: 7px 10px;
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 1.35;
+  padding: 10px;
   cursor: pointer;
   user-select: none;
 }
 
-.draftConfirmBox {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  align-items: center;
-  margin-top: 10px;
-  border-top: 1px solid var(--hairline);
-  padding-top: 10px;
+.draftConfirmBoxReady {
+  border-color: var(--accent, #5b6cff);
+  background: color-mix(in srgb, var(--accent, #5b6cff) 7%, var(--agent-chat-control));
 }
 
-.draftConfirmBox p {
+.draftConfirmCopy {
+  min-width: 0;
+}
+
+.draftConfirmCopy strong {
+  display: block;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.draftConfirmCopy p {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
 }
 
+.draftConfirmControl {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--agent-chat-main);
+  color: var(--ink);
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
+  user-select: none;
+}
+
 .draftConfirmControl input {
-  width: 15px;
-  height: 15px;
+  width: 18px;
+  height: 18px;
   accent-color: var(--accent, #5b6cff);
   cursor: pointer;
 }
@@ -768,13 +864,21 @@
 :global([data-theme='dark']) .draftConfirmControl,
 :global(:root[data-theme='dark']) .draftConfirmControl {
   border-color: var(--agent-chat-border-strong);
-  background: var(--panel-soft);
+  background: var(--agent-chat-main);
 }
 
 :global(body[data-theme='dark']) .draftConfirmBox,
 :global([data-theme='dark']) .draftConfirmBox,
 :global(:root[data-theme='dark']) .draftConfirmBox {
-  border-top-color: var(--agent-chat-border);
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
+}
+
+:global(body[data-theme='dark']) .draftConfirmBoxReady,
+:global([data-theme='dark']) .draftConfirmBoxReady,
+:global(:root[data-theme='dark']) .draftConfirmBoxReady {
+  border-color: var(--accent, #5b6cff);
+  background: color-mix(in srgb, var(--accent, #5b6cff) 12%, var(--agent-chat-control));
 }
 
 .payloadLabel {

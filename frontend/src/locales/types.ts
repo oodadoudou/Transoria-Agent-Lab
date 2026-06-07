@@ -375,6 +375,10 @@ export interface Messages {
     loadFailed: string;
     saveFailed: string;
     draftPayload: string;
+    draftConfirmTitle: string;
+    draftConfirmLabel: string;
+    draftConfirmUnchecked: string;
+    draftConfirmChecked: string;
     confirmationBoundary: string;
     memoryTitle: string;
     memorySub: string;
@@ -406,6 +410,15 @@ export interface Messages {
     activeRecipeSub: string;
     activeRecipeNone: string;
     activeRecipeManageHere: string;
+    activeTaskTitle: string;
+    activeTaskStatus: string;
+    activeTaskStartedAt: string;
+    activeTaskOpenDashboard: string;
+    activeTaskKind: {
+      translation: string;
+      glossary: string;
+      glossary_review: string;
+    };
     recipesPageTitle: string;
     recipesPageSub: string;
     recipesSectionTitle: string;

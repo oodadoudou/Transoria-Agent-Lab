@@ -16,6 +16,7 @@ import { useModelProfilesStore } from "@/store/useModelProfilesStore";
 import { usePromptPresetsStore } from "@/store/usePromptPresetsStore";
 import {
   useRuntimeStore,
+  usePollRunSnapshot,
   type RunKind,
 } from "@/store/useRuntimeStore";
 import { useTaskStore } from "@/store/useTaskStore";
@@ -34,6 +35,11 @@ export function ChatPage() {
   const messages = useMessages();
   const t = messages.agentLab;
   const navigate = useTaskStore((state) => state.navigate);
+  const translationHeader = useRuntimeStore((state) => state.translation.header);
+  const glossaryHeader = useRuntimeStore((state) => state.glossary.header);
+  const glossaryReviewHeader = useRuntimeStore(
+    (state) => state.glossary_review.header,
+  );
   const [workspace, setWorkspace] = useState<AgentWorkspace | null>(null);
   const [inventory, setInventory] = useState<AgentInventory | null>(null);
   const [input, setInput] = useState("");
@@ -59,6 +65,9 @@ export function ChatPage() {
   const [expandedMessages, setExpandedMessages] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  usePollRunSnapshot("translation");
+  usePollRunSnapshot("glossary");
+  usePollRunSnapshot("glossary_review");
 
   const applyResponse = (response: AgentWorkspaceResponse) => {
     setWorkspace(response.workspace);
@@ -261,6 +270,18 @@ export function ChatPage() {
       return agentBridge.updateWorkspace({ workflow_thinking_level: value });
     });
 
+  const openActiveTaskDashboard = (kind: AgentTaskKind) => {
+    if (kind === "translation") {
+      navigate({ module: "translation", page: "run" });
+      return;
+    }
+    if (kind === "glossary") {
+      navigate({ module: "glossary", page: "run" });
+      return;
+    }
+    navigate({ module: "glossary-review", page: "run" });
+  };
+
   const toggleMessageExpanded = (id: string) => {
     setExpandedMessages((current) => {
       const next = new Set(current);
@@ -274,6 +295,17 @@ export function ChatPage() {
   };
 
   const activeRecipe = pickActiveRecipe(workspace);
+  const activeTask = workspace?.active_task ?? null;
+  const activeTaskHeader =
+    activeTask?.kind === "translation"
+      ? translationHeader
+      : activeTask?.kind === "glossary"
+        ? glossaryHeader
+        : activeTask?.kind === "glossary_review"
+          ? glossaryReviewHeader
+          : null;
+  const matchedActiveTaskHeader =
+    activeTaskHeader?.id === activeTask?.task_id ? activeTaskHeader : null;
   const profileLookup = new Map(
     (inventory?.profiles ?? []).map((profile) => [profile.id, profile]),
   );
@@ -519,6 +551,35 @@ export function ChatPage() {
             </button>
           </div>
 
+          {activeTask ? (
+            <div className={styles.activeTaskBar}>
+              <div className={styles.activeTaskMain}>
+                <span className={styles.activeTaskBadge}>
+                  {t.activeTaskTitle}
+                </span>
+                <div>
+                  <strong>{t.activeTaskKind[activeTask.kind]}</strong>
+                  <p>
+                    {t.activeTaskStatus}:{" "}
+                    {formatTaskStatus(matchedActiveTaskHeader?.status, messages)}
+                    <span aria-hidden="true"> · </span>
+                    ID {activeTask.task_id}
+                    <span aria-hidden="true"> · </span>
+                    {t.activeTaskStartedAt}{" "}
+                    {formatDateTime(activeTask.started_at)}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                className={styles.activeTaskButton}
+                onClick={() => openActiveTaskDashboard(activeTask.kind)}
+              >
+                {t.activeTaskOpenDashboard}
+              </button>
+            </div>
+          ) : null}
+
           <div className={styles.messages} ref={messagesRef}>
             {(workspace?.messages ?? []).map((message) => {
               const isLong = message.content.length > COLLAPSE_MESSAGE_CHARS;
@@ -631,22 +692,29 @@ export function ChatPage() {
               <DraftConfirmationChecklist draft={workspace.pending_draft} />
               <div className={styles.payloadLabel}>{t.draftPayload}</div>
               <DraftPreview draft={workspace.pending_draft} />
-              <div className={styles.draftConfirmBox}>
-                <label className={styles.draftConfirmControl}>
+              <label
+                className={`${styles.draftConfirmBox} ${
+                  draftConfirmed ? styles.draftConfirmBoxReady : ""
+                }`}
+              >
+                <div className={styles.draftConfirmCopy}>
+                  <strong>{t.draftConfirmTitle}</strong>
+                  <p>
+                    {draftConfirmed
+                      ? t.draftConfirmChecked
+                    : t.draftConfirmUnchecked}
+                  </p>
+                </div>
+                <span className={styles.draftConfirmControl}>
                   <input
                     type="checkbox"
                     checked={draftConfirmed}
                     disabled={busy}
                     onChange={(event) => setDraftConfirmed(event.target.checked)}
                   />
-                  <span>我已检查草案内容，授权 Agent 执行这些动作。</span>
-                </label>
-                <p>
-                  {!draftConfirmed
-                    ? "勾选后才能应用；未勾选、放弃或调整都不会写入配置或启动任务。"
-                    : "已确认。点击「应用」后会按草案内容执行。"}
-                </p>
-              </div>
+                  <span>{t.draftConfirmLabel}</span>
+                </span>
+              </label>
               <div className={styles.actions}>
                 <Pill disabled={busy || !draftConfirmed} onClick={applyDraft}>
                   {t.applyDraft}
@@ -869,6 +937,35 @@ function shortLabel(label: string): string {
   const trimmed = label.trim();
   if (trimmed.length <= 14) return trimmed;
   return `${trimmed.slice(0, 13)}…`;
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+function formatTaskStatus(
+  status: string | undefined,
+  messages: ReturnType<typeof useMessages>,
+): string {
+  switch (status) {
+    case "running":
+      return messages.status.running;
+    case "stopping":
+    case "pausing":
+      return messages.status.stopping;
+    case "failed":
+      return messages.status.failed;
+    case "completed":
+      return messages.status.completed;
+    case "stopped":
+    case "paused":
+      return messages.status.stopped;
+    case "pending":
+    default:
+      return messages.status.running;
+  }
 }
 
 async function refreshPromptStoresFromResult(

@@ -129,3 +129,56 @@ def test_real_agent_drafts_and_applies_recipe(router) -> None:
     applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
     assert applied["workspace"]["recipes"]
     assert applied["result"]["recipe"]["name"]
+
+
+def test_real_agent_handles_naive_unknown_model_request(router) -> None:
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "我想加一个更厉害的模型来翻译小说，但我不知道模型 ID、"
+                "接口地址和 key 是什么，你帮我配一下。"
+            )
+        },
+    )
+
+    workspace = response["workspace"]
+    assert workspace["pending_draft"] is None
+    reply = workspace["messages"][-1]["content"]
+    assert "model" in reply.lower() or "模型" in reply
+    assert "key" in reply.lower() or "密钥" in reply
+
+
+def test_real_agent_drafts_dumb_glossary_workflow(router, tmp_path: Path) -> None:
+    source_dir = tmp_path / "novel"
+    source_dir.mkdir()
+    (source_dir / "sample.txt").write_text(
+        "이승원은 윤정현을 바라보았다.\n윤정현은 대답하지 않았다.",
+        encoding="utf-8",
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"帮我傻瓜式处理术语：{source_dir}\n"
+                "输出和输入放在同一个文件夹。\n"
+                "BL 作品指南\n背景/类型：现代\n"
+                "作品关键词：严肃、爱恨交织、禁忌关系。\n"
+                "人物：李承元和尹正贤。"
+            )
+        },
+    )
+
+    draft = response["workspace"]["pending_draft"]
+    assert draft is not None, "expected a glossary workflow draft"
+    assert draft["kind"] == "compound_config_update"
+    actions = draft["payload"]["actions"]
+    assert actions[0]["kind"] == "update_workspace"
+    assert actions[1]["kind"] == "start_glossary_task"
+    payload = actions[1]["payload"]
+    assert payload["input_dir"] == str(source_dir)
+    assert payload["output_dir"] == str(source_dir)
+    assert payload["source_language"] == "kr"
+    assert payload["target_language"] == "zh"
+    assert "严肃" in payload["novel_background"]

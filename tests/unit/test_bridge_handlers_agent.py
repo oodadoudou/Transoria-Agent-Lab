@@ -4580,6 +4580,39 @@ def test_agent_model_profile_copy_infers_provider_model_id_from_display_name(
     assert "provider model_id 改为 deepseek-v4-pro" in draft["summary"]
 
 
+def test_agent_model_profile_copy_extracts_display_name_override_wording(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    source = _seed_deepseek_pro_profile(tmp_path)
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "按照 DeepSeek-P 复制一个新模型，只把显示名称改成 Codex Smoke Pro，"
+                "provider model_id 改成 deepseek-v4-pro，其他配置都保持一样。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "create_model_profile"
+    assert draft["payload"]["profile"]["copy_from_profile_id"] == source.id
+    assert draft["payload"]["profile"]["display_name"] == "Codex Smoke Pro"
+    assert draft["payload"]["profile"]["model_id"] == "deepseek-v4-pro"
+    assert "请明确新配置的显示名称" not in response["workspace"]["messages"][-1][
+        "content"
+    ]
+
+
 def test_agent_model_profile_copy_asks_only_for_uninferable_provider_model_id(
     tmp_path: Path,
 ) -> None:

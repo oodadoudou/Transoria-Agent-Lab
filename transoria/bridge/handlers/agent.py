@@ -3529,7 +3529,7 @@ def _lookup_tokens(value: str) -> set[str]:
 
 def _extract_model_copy_display_name(text: str) -> str:
     patterns = (
-        r"(?:模型(?:显示)?(?:名称|名字|名)|display_name|display name)\s*(?:叫做|叫|改为|改成|设为|设置为|为|=|:|：)\s*[「『“\"']?(.+?)[」』”\"']?(?:[，。,.]|$)",
+        r"(?:模型(?:显示)?(?:名称|名字|名)|显示(?:名称|名字)|display_name|display name)\s*(?:叫做|叫|改为|改成|设为|设置为|为|=|:|：)\s*[「『“\"']?(.+?)[」』”\"']?(?:[，。,.]|$)",
         r"(?:配置|创建|新建)(?:一个|一套)?\s*[「『“\"']?(.+?)[」』”\"']?(?:的)?(?:新)?模型(?:配置)?",
     )
     for pattern in patterns:

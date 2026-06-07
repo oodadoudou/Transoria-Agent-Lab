@@ -633,6 +633,11 @@ export const en: Messages = {
     loadFailed: "Failed to load Agent workspace.",
     saveFailed: "Agent action failed.",
     draftPayload: "Draft payload",
+    draftConfirmTitle: "Execution confirmation",
+    draftConfirmLabel: "I reviewed the draft and authorize execution",
+    draftConfirmUnchecked:
+      "Confirm before applying. Without confirmation, discard or adjust will not save config or start tasks.",
+    draftConfirmChecked: "Confirmed. Apply will execute the draft as shown.",
     confirmationBoundary:
       "Permission boundary: the agent may prepare configuration and task actions, but every change or execution requires confirmation.",
     memoryTitle: "Memory",
@@ -670,6 +675,15 @@ export const en: Messages = {
       "Tasks the agent starts will use the stage model + prompt combination shown below.",
     activeRecipeNone: "No recipe applied yet.",
     activeRecipeManageHere: "Manage recipes from the Recipes sidebar page.",
+    activeTaskTitle: "Active task",
+    activeTaskStatus: "Status",
+    activeTaskStartedAt: "Started",
+    activeTaskOpenDashboard: "Open dashboard",
+    activeTaskKind: {
+      translation: "Translation task",
+      glossary: "Glossary extraction task",
+      glossary_review: "Glossary review task",
+    },
     recipesPageTitle: "Recipes",
     recipesPageSub:
       "A recipe binds the model and prompt for each of the three stages (translation / term extraction / term review) into a reusable bundle.",

@@ -614,6 +614,11 @@ export const zh: Messages = {
     loadFailed: "Agent 工作区加载失败。",
     saveFailed: "Agent 操作失败。",
     draftPayload: "草案内容",
+    draftConfirmTitle: "执行确认",
+    draftConfirmLabel: "我已检查草案，授权执行",
+    draftConfirmUnchecked:
+      "应用前必须先确认。未确认、放弃或调整都不会写入配置，也不会启动任务。",
+    draftConfirmChecked: "已确认。点击「应用」后会按草案内容执行。",
     confirmationBoundary:
       "权限边界：Agent 可以准备配置和任务动作，但每次修改或执行前都需要你确认。",
     memoryTitle: "记忆",
@@ -647,6 +652,15 @@ export const zh: Messages = {
     activeRecipeSub: "Agent 启动任务时将使用以下三阶段的模型与 Prompt。",
     activeRecipeNone: "尚未应用任何预设。",
     activeRecipeManageHere: "在「预设配置」侧边页里管理预设。",
+    activeTaskTitle: "当前任务",
+    activeTaskStatus: "状态",
+    activeTaskStartedAt: "开始",
+    activeTaskOpenDashboard: "查看 dashboard",
+    activeTaskKind: {
+      translation: "翻译任务",
+      glossary: "术语提取任务",
+      glossary_review: "术语审查任务",
+    },
     recipesPageTitle: "预设配置",
     recipesPageSub:
       "预设把三个阶段（翻译 / 术语提取 / 术语审核）的模型与 Prompt 绑定成一组可复用配置。",
