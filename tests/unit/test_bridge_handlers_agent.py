@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 from transoria.agent.configuration_agent import AGENT_SYSTEM_PROMPT
 from transoria.agent.project_store import AgentProjectStore
@@ -191,6 +192,40 @@ def _write_task(
     )
 
 
+def _write_glossary_review_final_task(
+    cache_root: Path,
+    *,
+    task_id: str,
+    rows: list[tuple[str, str, str, int]],
+) -> Path:
+    _write_task(
+        cache_root,
+        task_id=task_id,
+        kind=TaskKind.GLOSSARY_REVIEW,
+        status=TaskStatus.COMPLETED,
+    )
+    output_dir = cache_root / "review-final"
+    output_dir.mkdir(exist_ok=True)
+    output_path = output_dir / "glossary-review-final.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["src", "dst", "info", "frequency"])
+    for src, dst, info, frequency in rows:
+        sheet.append([src, dst, info, frequency])
+    workbook.save(output_path)
+    result_path = cache_root / "tasks" / task_id / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "kind": "glossary_review",
+                "output_path": str(output_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return output_path
+
+
 def test_read_workspace_returns_default_history_and_inventory(tmp_path: Path) -> None:
     _seed_profile(tmp_path)
     router = build_default_router(cache_root=tmp_path)
@@ -327,6 +362,185 @@ def test_agent_recent_task_summaries_include_artifact_availability(
     assert task["artifact_keys"] == ["output_files", "statistics"]
 
 
+def test_agent_translation_status_query_reads_statistics_without_llm(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    _write_task(
+        tmp_path,
+        task_id="translation-done",
+        kind=TaskKind.TRANSLATION,
+        status=TaskStatus.COMPLETED,
+    )
+    task_dir = tmp_path / "tasks" / "translation-done"
+    stats_path = task_dir / "translation-statistics.json"
+    stats_path.write_text(
+        json.dumps(
+            {
+                "completed_segments": 140,
+                "total_segments": 140,
+                "failed_subtasks": 0,
+                "low_confidence_segments": [
+                    {"segment_id": f"0:{index}", "reasons": ["source residue"]}
+                    for index in range(9)
+                ],
+                "translated_outputs": [str(tmp_path / "output" / "book-zh.epub")],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (task_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "kind": "translation",
+                "statistics_json_path": str(stats_path),
+                "completed_segments": 140,
+                "total_segments": 140,
+                "translated_files": [str(tmp_path / "output" / "book-zh.epub")],
+            }
+        ),
+        encoding="utf-8",
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "刚才 Agent 启动的翻译任务完成了吗？低置信有多少条？"
+                "我下一步应该去哪个页面校对？"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    workspace = response["workspace"]
+    assert workspace["pending_draft"] is None
+    reply = workspace["messages"][-1]["content"]
+    assert "translation-done" in reply
+    assert "已完成" in reply
+    assert "140/140" in reply
+    assert "失败子任务：0" in reply
+    assert "低置信：9 条" in reply
+    assert "翻译 > 校对" in reply
+
+
+def test_agent_glossary_status_query_guides_review_without_llm(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    _write_task(
+        tmp_path,
+        task_id="glossary-done",
+        kind=TaskKind.GLOSSARY,
+        status=TaskStatus.COMPLETED,
+    )
+    task_dir = tmp_path / "tasks" / "glossary-done"
+    stats_path = task_dir / "extraction-statistics.json"
+    combined_path = tmp_path / "output" / "combined-glossary.xlsx"
+    stats_path.write_text(
+        json.dumps(
+            {
+                "processed_files": ["book.epub"],
+                "candidate_count": 26,
+                "final_entry_count": 17,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (task_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "kind": "glossary",
+                "statistics_json_path": str(stats_path),
+                "combined_artifact": {"xlsx_path": str(combined_path)},
+                "per_novel_artifacts": [{"xlsx_path": str(combined_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "术语提取任务完成了吗？下一步我该做什么？"},
+    )
+
+    assert fake.requests == []
+    workspace = response["workspace"]
+    assert workspace["pending_draft"] is None
+    reply = workspace["messages"][-1]["content"]
+    assert "glossary-done" in reply
+    assert "已完成" in reply
+    assert "候选术语：26 条" in reply
+    assert "最终术语：17 条" in reply
+    assert "术语审查" in reply
+    assert str(combined_path) in reply
+
+
+def test_agent_glossary_review_status_query_guides_confirmation_without_llm(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    _write_task(
+        tmp_path,
+        task_id="glossary-review-done",
+        kind=TaskKind.GLOSSARY_REVIEW,
+        status=TaskStatus.COMPLETED,
+    )
+    output_path = tmp_path / "review" / "glossary-review-final.xlsx"
+    report_path = tmp_path / "review" / "glossary-review-report.xlsx"
+    task_dir = tmp_path / "tasks" / "glossary-review-done"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("final", encoding="utf-8")
+    report_path.write_text("report", encoding="utf-8")
+    (task_dir / "glossary-review-report.json").write_text("{}", encoding="utf-8")
+    (task_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "kind": "glossary_review",
+                "output_path": str(output_path),
+                "report_path": str(report_path),
+                "changed_count": 9,
+            }
+        ),
+        encoding="utf-8",
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "glossary-review-done 术语审查结束了吗？下一步去哪里确认？"},
+    )
+
+    assert fake.requests == []
+    workspace = response["workspace"]
+    assert workspace["pending_draft"] is None
+    reply = workspace["messages"][-1]["content"]
+    assert "glossary-review-done" in reply
+    assert "已完成" in reply
+    assert "模型审查修改：9 条" in reply
+    assert str(output_path) in reply
+    assert str(report_path) in reply
+    assert "数据表校对区" in reply
+    assert "术语表已确认，用它翻译" in reply
+
+
 def test_agent_artifact_availability_returns_false_for_missing_task(
     tmp_path: Path,
 ) -> None:
@@ -394,6 +608,35 @@ def test_agent_get_active_task_reconciles_stale_stopping_cache_record(
     assert response == {"active_task": None, "task": None}
     assert router.call("agent.read_workspace", {})["workspace"]["active_task"] is None
     record = TaskCache(root=tmp_path / "tasks").load_record("glossary-stale-stopping")
+    assert record.status is TaskStatus.STOPPED
+
+
+def test_agent_get_active_task_reconciles_stale_running_cache_record(
+    tmp_path: Path,
+) -> None:
+    _write_task(
+        tmp_path,
+        task_id="glossary-stale-running",
+        kind=TaskKind.GLOSSARY,
+        status=TaskStatus.RUNNING,
+    )
+    store = AgentProjectStore.from_cache_root(tmp_path)
+    state = store.load().with_active_task(
+        AgentActiveTask.create(
+            task_id="glossary-stale-running",
+            kind="glossary",
+            conversation_id=store.load().active_conversation_id or "",
+            started_at="2026-01-01T00:00:00.000+00:00",
+        )
+    )
+    store.save(state)
+    router = build_default_router(cache_root=tmp_path)
+
+    response = router.call("agent.get_active_task", {})
+
+    assert response == {"active_task": None, "task": None}
+    assert router.call("agent.read_workspace", {})["workspace"]["active_task"] is None
+    record = TaskCache(root=tmp_path / "tasks").load_record("glossary-stale-running")
     assert record.status is TaskStatus.STOPPED
 
 
@@ -1190,6 +1433,82 @@ def test_agent_directly_drafts_glossary_extraction_from_chat_inputs(
     assert "默认输出到 input 目录" in response["workspace"]["messages"][-1]["content"]
 
 
+def test_agent_glossary_start_apply_reports_dashboard_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_start_agent_task(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        service = kwargs["task_service"]
+        assert isinstance(service, TaskService)
+        service.cache.save_task(
+            TaskRecord(
+                id="glossary-agent-1",
+                kind=TaskKind.GLOSSARY,
+                status=TaskStatus.RUNNING,
+            )
+        )
+        return {
+            "task_id": "glossary-agent-1",
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        "transoria.bridge.handlers.agent.start_agent_task",
+        fake_start_agent_task,
+    )
+    _seed_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "book.txt").write_text("source text", encoding="utf-8")
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"请处理术语 workflow：{source_dir}。输出和输入放在同一个文件夹。"
+                "小说背景：现代 BL，严肃、爱恨交织、禁忌关系。"
+            )
+        },
+    )
+    draft = response["workspace"]["pending_draft"]
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    workspace = applied["workspace"]
+    assert workspace["active_task"] == {
+        "task_id": "glossary-agent-1",
+        "kind": "glossary",
+        "conversation_id": workspace["active_conversation_id"],
+        "started_at": "2026-01-01T00:00:00+00:00",
+    }
+    final_message = workspace["messages"][-1]["content"]
+    assert "已启动术语提取任务" in final_message
+    assert "任务 ID：glossary-agent-1" in final_message
+    assert "当前进度阶段：正在运行" in final_message
+    assert "术语提取 dashboard" in final_message
+    assert captured["draft_kind"] == "start_glossary_task"
+
+
 def test_agent_new_glossary_request_discards_stale_model_copy_draft(
     tmp_path: Path,
 ) -> None:
@@ -1330,6 +1649,307 @@ def test_agent_drafts_glossary_from_directory_and_background_without_llm(
     assert draft["payload"]["novel_background"] == "现代 BL，严肃，爱恨交织"
 
 
+def test_agent_infers_sibling_output_folder_from_fuzzy_output_wording(
+    tmp_path: Path,
+) -> None:
+    project_dir = tmp_path / "novel-project"
+    input_dir = project_dir / "input"
+    output_dir = project_dir / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir()
+    _seed_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"帮我处理一下这个目录里的术语：{input_dir}。"
+                "输出也放这个项目的 output 里。背景是现代 BL，严肃、爱恨交织。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_glossary_task"
+    assert draft["payload"]["input_dir"] == str(input_dir)
+    assert draft["payload"]["output_dir"] == str(output_dir)
+    assert "默认输出到 input" not in response["workspace"]["messages"][-1]["content"]
+
+
+def test_agent_glossary_path_and_background_replaces_stale_model_copy_draft(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    source_dir = tmp_path / "C-pale-dawn copy"
+    source_dir.mkdir()
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+    stale = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "按照 DeepSeek flash 的配置复制一个新模型配置，"
+                "模型名字叫做 DeepSeek-P。"
+            )
+        },
+    )["workspace"]["pending_draft"]
+    assert stale["kind"] == "create_model_profile"
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"{source_dir}/\n"
+                "输出和输入放在同一个文件夹里。\n"
+                "BL 作品指南\n\n"
+                "背景/类型：现代\n\n"
+                "作品关键词：严肃、爱恨交织、禁忌关系\n\n"
+                "人物介绍\n"
+                "攻：李承元 (이승원)\n"
+                "受：尹正贤 (윤정현)"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    workspace = response["workspace"]
+    draft = workspace["pending_draft"]
+    assert draft["kind"] == "start_glossary_task"
+    assert draft["payload"]["input_dir"].rstrip("/") == str(source_dir)
+    assert draft["payload"]["output_dir"].rstrip("/") == str(source_dir)
+    assert "BL 作品指南" in draft["payload"]["novel_background"]
+    assert workspace["draft_history"][-1]["id"] == stale["id"]
+    assert workspace["draft_history"][-1]["status"] == "discarded"
+
+
+def test_agent_glossary_path_trims_inline_guide_title_after_stale_model_copy(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    source_dir = (
+        "/Users/doudouda/Downloads/Personal_doc/Novels/Translate/Keyword/"
+        "C-苍白黎明-페일 던 copy"
+    )
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+    stale = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "按照 DeepSeek flash 的配置复制一个新模型配置，"
+                "模型名字叫做 DeepSeek-P。"
+            )
+        },
+    )["workspace"]["pending_draft"]
+    assert stale["kind"] == "create_model_profile"
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"{source_dir}/   BL 作品指南\n\n"
+                "背景/类型：现代\n\n"
+                "作品关键词：严肃、爱恨交织、禁忌关系\n\n"
+                "人物介绍\n\n"
+                "攻：李承元 (이승원)\n\n"
+                "受：尹正贤 (윤정현)\n\n"
+                "输出和输入放在同一个文件夹里。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    workspace = response["workspace"]
+    draft = workspace["pending_draft"]
+    assert draft["kind"] == "start_glossary_task"
+    assert draft["payload"]["input_dir"].rstrip("/") == source_dir
+    assert draft["payload"]["output_dir"].rstrip("/") == source_dir
+    assert draft["payload"]["novel_background"].startswith("BL 作品指南")
+    assert workspace["draft_history"][-1]["id"] == stale["id"]
+    assert workspace["draft_history"][-1]["status"] == "discarded"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "先跑这个目录的术语表 workflow",
+        "处理这个目录的数据表提取",
+        "帮我整理这个小说的关键词和术语表",
+        "帮我处理这本小说的完整流程",
+        "跑一下整套 workflow",
+    ],
+)
+def test_agent_drafts_glossary_for_fuzzy_term_workflow_commands(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    source_dir = tmp_path / "C-pale-dawn copy"
+    source_dir.mkdir()
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+    stale = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "按照 DeepSeek flash 的配置复制一个新模型配置，"
+                "模型名字叫做 DeepSeek-P。"
+            )
+        },
+    )["workspace"]["pending_draft"]
+    assert stale["kind"] == "create_model_profile"
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"{command}\n"
+                f"{source_dir}/\n"
+                "输出和输入放在同一个文件夹里。\n"
+                "BL 作品指南\n\n"
+                "背景/类型：现代\n"
+                "作品关键词：严肃、爱恨交织、禁忌关系\n"
+                "人物介绍：李承元和尹正贤。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    workspace = response["workspace"]
+    draft = workspace["pending_draft"]
+    assert draft["kind"] == "start_glossary_task"
+    assert draft["payload"]["input_dir"].rstrip("/") == str(source_dir)
+    assert draft["payload"]["output_dir"].rstrip("/") == str(source_dir)
+    assert "BL 作品指南" in draft["payload"]["novel_background"]
+    assert workspace["draft_history"][-1]["id"] == stale["id"]
+    assert workspace["draft_history"][-1]["status"] == "discarded"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "先跑术语表 workflow",
+        "帮我处理术语表",
+        "做一下数据表提取",
+        "帮我处理这本小说",
+        "跑完整流程",
+    ],
+)
+def test_agent_fuzzy_glossary_request_without_path_asks_for_input(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+    stale = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "按照 DeepSeek flash 的配置复制一个新模型配置，"
+                "模型名字叫做 DeepSeek-P。"
+            )
+        },
+    )["workspace"]["pending_draft"]
+    assert stale["kind"] == "create_model_profile"
+
+    response = router.call("agent.send_message", {"message": command})
+
+    workspace = response["workspace"]
+    assert fake.requests == []
+    assert workspace["pending_draft"] is None
+    assert "请提供 input 目录" in workspace["messages"][-1]["content"]
+    assert workspace["draft_history"][-1]["id"] == stale["id"]
+    assert workspace["draft_history"][-1]["status"] == "discarded"
+
+
 def test_agent_glossary_extraction_requires_background(
     tmp_path: Path,
 ) -> None:
@@ -1450,6 +2070,398 @@ def test_agent_directly_drafts_translation_from_chat_inputs(
     assert draft["payload"]["target_language"] == "zh"
     assert draft["payload"]["glossary_task_id"] == task_id
     assert "启动翻译" in draft["title"]
+
+
+def test_agent_strong_translation_request_discards_stale_model_draft(
+    tmp_path: Path,
+) -> None:
+    task_id = "glossary-ready-translation"
+    _write_task(
+        tmp_path,
+        task_id=task_id,
+        kind=TaskKind.GLOSSARY,
+        status=TaskStatus.COMPLETED,
+    )
+    input_dir = tmp_path / "novel-input"
+    output_dir = tmp_path / "translated-output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "book.txt").write_text("source text", encoding="utf-8")
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.TRANSLATION,
+        preset_id="translation-custom",
+        name="Translation Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"translation": "profile-workflow"},
+                "stage_prompt_ids": {"translation": "translation-custom"},
+            }
+        },
+    )
+    stale = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "按照 DeepSeek flash 的配置复制一个新模型配置，"
+                "模型名字叫做 DeepSeek-P。"
+            )
+        },
+    )["workspace"]["pending_draft"]
+    assert stale["kind"] == "create_model_profile"
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"请启动翻译任务，使用术语表 workflow {task_id}。"
+                f"input: {input_dir}，output: {output_dir}。源语言 kr，目标语言 zh。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    workspace = response["workspace"]
+    draft = workspace["pending_draft"]
+    assert draft["kind"] == "start_translation_task"
+    assert draft["payload"]["input_dir"] == str(input_dir)
+    assert draft["payload"]["output_dir"] == str(output_dir)
+    assert draft["payload"]["glossary_task_id"] == task_id
+    assert workspace["draft_history"][-1]["id"] == stale["id"]
+    assert workspace["draft_history"][-1]["status"] == "discarded"
+
+
+def test_agent_direct_translation_uses_latest_reviewed_glossary(
+    tmp_path: Path,
+) -> None:
+    review_task_id = "glossary-review-ready-translation"
+    _write_glossary_review_final_task(
+        tmp_path,
+        task_id=review_task_id,
+        rows=[("이승원", "李承元", "人物", 3)],
+    )
+    input_dir = tmp_path / "novel-input"
+    output_dir = tmp_path / "translated-output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "book.txt").write_text("source text", encoding="utf-8")
+    _seed_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.TRANSLATION,
+        preset_id="translation-custom",
+        name="Translation Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"translation": "profile-workflow"},
+                "stage_prompt_ids": {"translation": "translation-custom"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"请用刚才审查好的术语表开始翻译，input: {input_dir}，"
+                f"output: {output_dir}。源语言 kr，目标语言 zh。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_translation_task"
+    assert draft["payload"]["glossary_review_task_id"] == review_task_id
+    assert "glossary_task_id" not in draft["payload"]
+    assert "确认术语表" in draft["summary"]
+
+
+def test_agent_direct_translation_with_reviewed_glossary_and_epub_wording(
+    tmp_path: Path,
+) -> None:
+    review_task_id = "glossary-review-natural-translation"
+    _write_glossary_review_final_task(
+        tmp_path,
+        task_id=review_task_id,
+        rows=[("윤정현", "尹正贤", "人物", 4)],
+    )
+    input_dir = tmp_path / "novel-input"
+    output_dir = tmp_path / "translated-output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "book.epub").write_text("source text", encoding="utf-8")
+    _seed_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.TRANSLATION,
+        preset_id="translation-custom",
+        name="Translation Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"translation": "profile-workflow"},
+                "stage_prompt_ids": {"translation": "translation-custom"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"用刚才审查好的术语表翻译这个短篇测试 epub。\n"
+                f"输入目录：{input_dir}\n"
+                f"输出目录：{output_dir}\n"
+                "源语言 kr，目标语言 zh。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_translation_task"
+    assert draft["payload"]["input_dir"] == str(input_dir)
+    assert draft["payload"]["output_dir"] == str(output_dir)
+    assert draft["payload"]["glossary_review_task_id"] == review_task_id
+    assert "glossary_task_id" not in draft["payload"]
+
+
+def test_agent_translation_followup_after_confirmed_glossary_reuses_chat_dirs(
+    tmp_path: Path,
+) -> None:
+    review_task_id = "glossary-review-confirmed-followup"
+    _write_glossary_review_final_task(
+        tmp_path,
+        task_id=review_task_id,
+        rows=[("이승원", "李承元", "人物", 3)],
+    )
+    input_dir = tmp_path / "novel-input"
+    output_dir = tmp_path / "translated-output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "book.epub").write_text("source text", encoding="utf-8")
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.TRANSLATION,
+        preset_id="translation-custom",
+        name="Translation Custom",
+    )
+    router, fake = _router_with_workflow(tmp_path, '{"reply":"已记录目录。","draft":null}')
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "stage_model_ids": {"translation": "profile-workflow"},
+                "stage_prompt_ids": {"translation": "translation-custom"},
+            }
+        },
+    )
+    context_response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"记录一下：input 目录是 {input_dir}，output 目录是 {output_dir}。"
+                "源语言 kr，目标语言 zh。"
+            )
+        },
+    )
+    assert context_response["workspace"]["pending_draft"] is None
+    assert len(fake.requests) == 1
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "术语表已经确认好了，继续下一步。"},
+    )
+
+    assert len(fake.requests) == 1
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_translation_task"
+    assert draft["payload"]["input_dir"] == str(input_dir)
+    assert draft["payload"]["output_dir"] == str(output_dir)
+    assert draft["payload"]["source_language"] == "kr"
+    assert draft["payload"]["target_language"] == "zh"
+    assert draft["payload"]["glossary_review_task_id"] == review_task_id
+    assert "glossary_task_id" not in draft["payload"]
+
+
+def test_agent_translation_followup_after_confirmed_glossary_requires_dirs(
+    tmp_path: Path,
+) -> None:
+    _write_glossary_review_final_task(
+        tmp_path,
+        task_id="glossary-review-confirmed-no-dirs",
+        rows=[("윤정현", "尹正贤", "人物", 4)],
+    )
+    _seed_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.TRANSLATION,
+        preset_id="translation-custom",
+        name="Translation Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"translation": "profile-workflow"},
+                "stage_prompt_ids": {"translation": "translation-custom"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "术语表已经确认好了，继续下一步。"},
+    )
+
+    assert fake.requests == []
+    assert response["workspace"]["pending_draft"] is None
+    assert "请提供 input 目录" in response["workspace"]["messages"][-1]["content"]
+
+
+def test_agent_translation_apply_loads_reviewed_glossary_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    review_task_id = "glossary-review-final-ready"
+    _write_glossary_review_final_task(
+        tmp_path,
+        task_id=review_task_id,
+        rows=[("윤정현", "尹正贤", "人物", 4)],
+    )
+    input_dir = tmp_path / "novel-input"
+    output_dir = tmp_path / "translated-output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "book.txt").write_text("source text", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_start_translation_with_config(
+        self: TaskService,
+        config: object,
+        *,
+        request_id: str,
+    ) -> dict[str, object]:
+        captured["config"] = config
+        captured["request_id"] = request_id
+        self.cache.save_task(
+            TaskRecord(
+                id="translation-reviewed-1",
+                kind=TaskKind.TRANSLATION,
+                status=TaskStatus.RUNNING,
+            )
+        )
+        return {
+            "task_id": "translation-reviewed-1",
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        TaskService,
+        "start_translation_with_config",
+        fake_start_translation_with_config,
+    )
+    router, fake = _router_with_workflow(tmp_path, '{"reply":"wrong","draft":null}')
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.TRANSLATION,
+        preset_id="translation-custom",
+        name="Translation Custom",
+    )
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "stage_model_ids": {"translation": "profile-workflow"},
+                "stage_prompt_ids": {"translation": "translation-custom"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"请使用术语审查任务 {review_task_id} 开始翻译小说。"
+                f"input: {input_dir}，output: {output_dir}。源语言 kr，目标语言 zh。"
+            )
+        },
+    )
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["payload"]["glossary_review_task_id"] == review_task_id
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    assert applied["result"]["task"]["task_id"] == "translation-reviewed-1"
+    config = captured["config"]
+    entries = getattr(getattr(config, "glossary"), "entries")
+    assert [(entry.src, entry.dst, entry.info) for entry in entries] == [
+        ("윤정현", "尹正贤", "人物")
+    ]
+
+
+def test_agent_extract_then_translate_phrase_still_starts_with_glossary(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "novel-input"
+    input_dir.mkdir()
+    _seed_profile(tmp_path)
+    _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.GLOSSARY,
+        preset_id="glossary-custom",
+        name="Glossary Custom",
+    )
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_extract": "profile-workflow"},
+                "stage_prompt_ids": {"term_extract": "glossary-custom"},
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"请先提取术语，之后再翻译。input: {input_dir}。"
+                "小说背景：现代 BL，人物关系复杂。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_glossary_task"
 
 
 def test_agent_translation_requires_distinct_output_directory(
@@ -1867,7 +2879,469 @@ def test_direct_glossary_review_request_creates_review_draft(
     assert draft["kind"] == "start_glossary_review_task"
     assert draft["payload"]["glossary_task_id"] == task_id
     assert "现代 BL" in draft["payload"]["novel_background"]
+    assert "source_language" not in draft["payload"]
+    assert "target_language" not in draft["payload"]
     assert "请提供 input 目录" not in response["workspace"]["messages"][-1]["content"]
+    assert "语言只作为任务覆盖项" not in response["workspace"]["messages"][-1]["content"]
+
+
+def test_glossary_review_request_discards_stale_model_copy_draft(
+    tmp_path: Path,
+) -> None:
+    task_id = "glossary-ready-review"
+    _write_task(
+        tmp_path,
+        task_id=task_id,
+        kind=TaskKind.GLOSSARY,
+        status=TaskStatus.COMPLETED,
+    )
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    xlsx_path = artifact_dir / "book-Glossary.xlsx"
+    json_path = artifact_dir / "book-Glossary.json"
+    references_path = artifact_dir / "book-Glossary-references.txt"
+    xlsx_path.write_bytes(b"placeholder")
+    json_path.write_text("[]", encoding="utf-8")
+    references_path.write_text("refs", encoding="utf-8")
+    result_path = tmp_path / "tasks" / task_id / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "kind": "glossary",
+                "combined_artifact": {
+                    "novel_name": "book",
+                    "xlsx_path": str(xlsx_path),
+                    "json_path": str(json_path),
+                    "references_path": str(references_path),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_review": "profile-workflow"},
+                "stage_prompt_ids": {
+                    "term_review": DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
+                },
+            }
+        },
+    )
+    stale = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "按照 DeepSeek flash 的配置复制一个新模型配置，"
+                "模型名字叫做 DeepSeek-P。"
+            )
+        },
+    )["workspace"]["pending_draft"]
+    assert stale["kind"] == "create_model_profile"
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                f"请使用刚刚完成的术语提取任务 {task_id} 启动术语审查。"
+                "小说背景沿用：现代 BL，严肃、爱恨交织、禁忌关系，李承元和尹正贤。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    workspace = response["workspace"]
+    draft = workspace["pending_draft"]
+    assert draft["kind"] == "start_glossary_review_task"
+    assert draft["payload"]["glossary_task_id"] == task_id
+    assert "现代 BL" in draft["payload"]["novel_background"]
+    assert workspace["draft_history"][-1]["id"] == stale["id"]
+    assert workspace["draft_history"][-1]["status"] == "discarded"
+
+
+def test_direct_glossary_review_request_uses_latest_completed_glossary_task(
+    tmp_path: Path,
+) -> None:
+    task_id = "glossary-latest-ready"
+    _write_task(
+        tmp_path,
+        task_id=task_id,
+        kind=TaskKind.GLOSSARY,
+        status=TaskStatus.COMPLETED,
+    )
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    xlsx_path = artifact_dir / "latest-Glossary.xlsx"
+    json_path = artifact_dir / "latest-Glossary.json"
+    references_path = artifact_dir / "latest-Glossary-references.txt"
+    xlsx_path.write_bytes(b"placeholder")
+    json_path.write_text("[]", encoding="utf-8")
+    references_path.write_text("refs", encoding="utf-8")
+    result_path = tmp_path / "tasks" / task_id / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "kind": "glossary",
+                "combined_artifact": {
+                    "novel_name": "latest",
+                    "xlsx_path": str(xlsx_path),
+                    "json_path": str(json_path),
+                    "references_path": str(references_path),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    router, fake = _router_with_workflow(tmp_path, '{"reply":"wrong","draft":null}')
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "stage_model_ids": {"term_review": "profile-workflow"},
+                "stage_prompt_ids": {
+                    "term_review": DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
+                },
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "继续审查刚才提取的术语表。小说背景：现代 BL。"},
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_glossary_review_task"
+    assert draft["payload"]["glossary_task_id"] == task_id
+    assert "现代 BL" in draft["payload"]["novel_background"]
+
+
+def test_glossary_followup_next_step_drafts_review_task(
+    tmp_path: Path,
+) -> None:
+    task_id = "glossary-followup-ready"
+    _write_task(
+        tmp_path,
+        task_id=task_id,
+        kind=TaskKind.GLOSSARY,
+        status=TaskStatus.COMPLETED,
+    )
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    xlsx_path = artifact_dir / "followup-Glossary.xlsx"
+    json_path = artifact_dir / "followup-Glossary.json"
+    references_path = artifact_dir / "followup-Glossary-references.txt"
+    xlsx_path.write_bytes(b"placeholder")
+    json_path.write_text("[]", encoding="utf-8")
+    references_path.write_text("refs", encoding="utf-8")
+    result_path = tmp_path / "tasks" / task_id / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "kind": "glossary",
+                "combined_artifact": {
+                    "novel_name": "followup",
+                    "xlsx_path": str(xlsx_path),
+                    "json_path": str(json_path),
+                    "references_path": str(references_path),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    router, fake = _router_with_workflow(tmp_path, '{"reply":"wrong","draft":null}')
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "stage_model_ids": {"term_review": "profile-workflow"},
+                "stage_prompt_ids": {
+                    "term_review": DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
+                },
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "术语提取已经跑完了，继续下一步。小说背景：现代 BL。"},
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_glossary_review_task"
+    assert draft["payload"]["glossary_task_id"] == task_id
+    assert draft["payload"]["novel_background"] == "现代 BL"
+
+
+def test_glossary_review_background_ignores_assistant_task_receipts(
+    tmp_path: Path,
+) -> None:
+    task_id = "glossary-latest-clean-background"
+    _write_task(
+        tmp_path,
+        task_id=task_id,
+        kind=TaskKind.GLOSSARY,
+        status=TaskStatus.COMPLETED,
+    )
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    xlsx_path = artifact_dir / "clean-Glossary.xlsx"
+    json_path = artifact_dir / "clean-Glossary.json"
+    references_path = artifact_dir / "clean-Glossary-references.txt"
+    xlsx_path.write_bytes(b"placeholder")
+    json_path.write_text("[]", encoding="utf-8")
+    references_path.write_text("refs", encoding="utf-8")
+    result_path = tmp_path / "tasks" / task_id / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "kind": "glossary",
+                "combined_artifact": {
+                    "novel_name": "clean",
+                    "xlsx_path": str(xlsx_path),
+                    "json_path": str(json_path),
+                    "references_path": str(references_path),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _seed_profile(tmp_path)
+    fake = SequenceAgentClient(
+        [
+            """
+            {
+              "reply": "已应用草案：启动术语提取\\n任务 ID：glossary-latest-clean-background\\n当前进度阶段：正在运行。",
+              "draft": null
+            }
+            """
+        ]
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "workflow_model_id": "profile-workflow",
+                "stage_model_ids": {"term_review": "profile-workflow"},
+                "stage_prompt_ids": {
+                    "term_review": DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
+                },
+            }
+        },
+    )
+    background = (
+        "BL 作品指南\n\n"
+        "背景/类型：现代\n\n"
+        "作品关键词：严肃、爱恨交织、禁忌关系\n\n"
+        "人物介绍\n李承元和尹正贤。"
+    )
+
+    router.call("agent.send_message", {"message": background})
+    response = router.call(
+        "agent.send_message",
+        {"message": "术语提取已经跑完了。请把刚才生成的术语表审一遍。"},
+    )
+
+    assert len(fake.requests) == 1
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_glossary_review_task"
+    assert draft["payload"]["glossary_task_id"] == task_id
+    assert draft["payload"]["novel_background"] == background.rstrip("。")
+    assert "已应用草案" not in draft["payload"]["novel_background"]
+    assert "术语提取已经跑完了" not in draft["payload"]["novel_background"]
+
+
+def test_direct_glossary_review_request_understands_review_once_wording(
+    tmp_path: Path,
+) -> None:
+    task_id = "glossary-review-once-ready"
+    _write_task(
+        tmp_path,
+        task_id=task_id,
+        kind=TaskKind.GLOSSARY,
+        status=TaskStatus.COMPLETED,
+    )
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    xlsx_path = artifact_dir / "review-once-Glossary.xlsx"
+    json_path = artifact_dir / "review-once-Glossary.json"
+    references_path = artifact_dir / "review-once-Glossary-references.txt"
+    xlsx_path.write_bytes(b"placeholder")
+    json_path.write_text("[]", encoding="utf-8")
+    references_path.write_text("refs", encoding="utf-8")
+    result_path = tmp_path / "tasks" / task_id / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "kind": "glossary",
+                "combined_artifact": {
+                    "novel_name": "review-once",
+                    "xlsx_path": str(xlsx_path),
+                    "json_path": str(json_path),
+                    "references_path": str(references_path),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    router, fake = _router_with_workflow(tmp_path, '{"reply":"wrong","draft":null}')
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "stage_model_ids": {"term_review": "profile-workflow"},
+                "stage_prompt_ids": {
+                    "term_review": DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
+                },
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "刚才提取出来的术语表帮我审一遍，重点看人名一致性。"},
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "start_glossary_review_task"
+    assert draft["payload"]["glossary_task_id"] == task_id
+
+
+def test_glossary_review_prompt_request_is_not_task_start(
+    tmp_path: Path,
+) -> None:
+    router, fake = _router_with_workflow(
+        tmp_path,
+        """
+        {
+          "reply": "Ready.",
+          "draft": {
+            "kind": "create_prompt_preset",
+            "title": "创建术语审查 Prompt",
+            "summary": "创建新的术语审查提示词。",
+            "payload": {
+              "kind": "glossary_review",
+              "name": "术语审查 Prompt",
+              "description": "test",
+              "system_prompt": "review glossary terms",
+              "enabled": true
+            }
+          }
+        }
+        """,
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": "请新建一套术语审查 Prompt，重点检查人名一致性。"},
+    )
+
+    assert len(fake.requests) == 1
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "create_prompt_preset"
+    assert draft["payload"]["kind"] == "glossary_review"
+
+
+def test_agent_glossary_review_start_apply_reports_dashboard_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = "glossary-ready-review"
+    _write_task(
+        tmp_path,
+        task_id=task_id,
+        kind=TaskKind.GLOSSARY,
+        status=TaskStatus.COMPLETED,
+    )
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    xlsx_path = artifact_dir / "book-Glossary.xlsx"
+    json_path = artifact_dir / "book-Glossary.json"
+    references_path = artifact_dir / "book-Glossary-references.txt"
+    xlsx_path.write_bytes(b"placeholder")
+    json_path.write_text("[]", encoding="utf-8")
+    references_path.write_text("refs", encoding="utf-8")
+    result_path = tmp_path / "tasks" / task_id / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "kind": "glossary",
+                "combined_artifact": {
+                    "novel_name": "book",
+                    "xlsx_path": str(xlsx_path),
+                    "json_path": str(json_path),
+                    "references_path": str(references_path),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_start_agent_task(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        service = kwargs["task_service"]
+        assert isinstance(service, TaskService)
+        service.cache.save_task(
+            TaskRecord(
+                id="glossary-review-agent-1",
+                kind=TaskKind.GLOSSARY_REVIEW,
+                status=TaskStatus.RUNNING,
+            )
+        )
+        return {
+            "task_id": "glossary-review-agent-1",
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        "transoria.bridge.handlers.agent.start_agent_task",
+        fake_start_agent_task,
+    )
+    router, fake = _router_with_workflow(tmp_path, '{"reply":"wrong","draft":null}')
+    router.call(
+        "agent.update_workspace",
+        {
+            "patch": {
+                "stage_model_ids": {"term_review": "profile-workflow"},
+                "stage_prompt_ids": {
+                    "term_review": DEFAULT_GLOSSARY_REVIEW_PRESET_ID,
+                },
+            }
+        },
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {"message": f"用 glossary task {task_id} 继续做术语审查。小说背景：现代 BL。"},
+    )
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    workspace = applied["workspace"]
+    assert workspace["active_task"] == {
+        "task_id": "glossary-review-agent-1",
+        "kind": "glossary_review",
+        "conversation_id": workspace["active_conversation_id"],
+        "started_at": "2026-01-01T00:00:00+00:00",
+    }
+    final_message = workspace["messages"][-1]["content"]
+    assert "已启动术语审查任务" in final_message
+    assert "任务 ID：glossary-review-agent-1" in final_message
+    assert "当前进度阶段：正在运行" in final_message
+    assert "术语审查 dashboard" in final_message
+    assert captured["draft_kind"] == "start_glossary_review_task"
 
 
 def test_send_message_calls_api_with_system_prompt_and_inventory(
@@ -2539,6 +4013,76 @@ def test_agent_directly_drafts_model_profile_copy_from_existing_config(
     assert created[0].thinking_level == source.thinking_level
 
 
+def test_agent_compound_can_create_model_then_select_it(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    source = _seed_deepseek_profile(tmp_path)
+    fake = FakeAgentClient(
+        """
+        {
+          "reply": "我准备了复合配置草案。",
+          "draft": {
+            "kind": "compound_config_update",
+            "title": "创建并切换工作模型",
+            "summary": "复制 DeepSeek-f 为新配置，然后把工作模型切到新配置。",
+            "payload": {
+              "actions": [
+                {
+                  "kind": "create_model_profile",
+                  "title": "复制 DeepSeek Pro",
+                  "summary": "复制 DeepSeek-f 的运行配置。",
+                  "payload": {
+                    "profile": {
+                      "id": "deepseek-pro-copy",
+                      "copy_from_profile_id": "deepseek-f",
+                      "display_name": "DeepSeek Pro",
+                      "model_id": "deepseek-v4-pro"
+                    }
+                  }
+                },
+                {
+                  "kind": "update_workspace",
+                  "title": "切换工作模型",
+                  "summary": "使用刚创建的模型作为工作模型和术语提取模型。",
+                  "payload": {
+                    "workflow_model_id": "deepseek-pro-copy",
+                    "stage_model_ids": {
+                      "term_extract": "deepseek-pro-copy"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+        """,
+    )
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call("agent.send_message", {"message": "复制模型并切换"})
+    draft = response["workspace"]["pending_draft"]
+
+    assert draft["kind"] == "compound_config_update"
+    assert ModelProfileStore.from_cache_root(tmp_path).get("deepseek-pro-copy") is None
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    created = ModelProfileStore.from_cache_root(tmp_path).get("deepseek-pro-copy")
+    assert created is not None
+    assert created.display_name == "DeepSeek Pro"
+    assert created.base_url == source.base_url
+    assert created.model_id == "deepseek-v4-pro"
+    assert created.api_keys == source.api_keys
+    workspace = applied["workspace"]
+    assert workspace["workflow_model_id"] == "deepseek-pro-copy"
+    assert workspace["stage_model_ids"]["term_extract"] == "deepseek-pro-copy"
+
+
 def test_agent_model_profile_copy_uses_recent_context_for_short_confirmation(
     tmp_path: Path,
 ) -> None:
@@ -2575,7 +4119,7 @@ def test_agent_model_profile_copy_uses_recent_context_for_short_confirmation(
     assert draft["payload"]["profile"]["display_name"] == "DeepSeek-P"
 
 
-def test_agent_model_profile_copy_asks_only_for_missing_provider_model_id(
+def test_agent_model_profile_copy_infers_provider_model_id_from_display_name(
     tmp_path: Path,
 ) -> None:
     _seed_profile(tmp_path)
@@ -2594,6 +4138,36 @@ def test_agent_model_profile_copy_asks_only_for_missing_provider_model_id(
                 "从 DeepSeek flash 的配置复制创建一个新的，不要用相同的模型 ID，"
                 "而是用一样的 URL 和 provider format，"
                 "然后将模型名称改为 DeepSeek 4 Pro。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "create_model_profile"
+    assert draft["payload"]["profile"]["display_name"] == "DeepSeek 4 Pro"
+    assert draft["payload"]["profile"]["model_id"] == "deepseek-v4-pro"
+    assert "provider model_id 改为 deepseek-v4-pro" in draft["summary"]
+
+
+def test_agent_model_profile_copy_asks_only_for_uninferable_provider_model_id(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "从 DeepSeek flash 的配置复制创建一个新的，不要用相同的模型 ID，"
+                "而是用一样的 URL 和 provider format，模型名字叫做 DeepSeek Custom。"
             )
         },
     )

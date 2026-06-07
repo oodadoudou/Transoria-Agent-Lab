@@ -396,7 +396,8 @@ Or:
       "output_dir": "/absolute/output/folder",
       "source_language": "kr",
       "target_language": "zh",
-      "glossary_task_id": "optional glossary-task-id"
+      "glossary_task_id": "optional glossary-task-id",
+      "glossary_review_task_id": "optional glossary-review-task-id for reviewed/confirmed glossary tables"
     }
   }
 }

@@ -230,7 +230,11 @@ def _build_handlers(
                 details={"max_length": 8000},
             )
 
-        current = _load_with_reconciled_active_task(project_store, task_service)
+        current = _load_with_reconciled_active_task(
+            project_store,
+            task_service,
+            reconcile_stale=False,
+        )
         conversation = _require_active(current)
         previous_pending = conversation.pending_draft
         conversation = conversation.append_message(
@@ -599,23 +603,39 @@ def _generate_reply(
             "当前工作模型没有可用 API key。请先在模型页补全 key，或切换到已配置的模型。",
             None,
         )
+    conversation_context = _recent_conversation_context(state)
+    if not user_message.startswith("The user clicked Adjust on the current pending draft."):
+        status_state = _task_status_context(task_service)
+        if not (
+            _looks_like_glossary_review_followup_request(user_message, status_state)
+            or _looks_like_translation_after_review_followup_request(
+                user_message,
+                status_state,
+            )
+        ):
+            direct = _direct_stage_status_response(
+                user_message=user_message,
+                current_state=status_state,
+                task_service=task_service,
+            )
+            if direct is not None:
+                return direct
     inventory = _inventory(profile_store, cache_root)
     current_state = _llm_context(
         state,
         settings_store=settings_store,
         task_service=task_service,
     )
-    conversation_context = _recent_conversation_context(state)
     direct = None
     if not user_message.startswith("The user clicked Adjust on the current pending draft."):
-        direct = _direct_glossary_review_response(
+        direct = _direct_translation_response(
             user_message=user_message,
             conversation_context=conversation_context,
             state=state,
             current_state=current_state,
         )
         if direct is None:
-            direct = _direct_translation_response(
+            direct = _direct_glossary_review_response(
                 user_message=user_message,
                 conversation_context=conversation_context,
                 state=state,
@@ -939,6 +959,39 @@ def _recent_conversation_context(
     ]
 
 
+def _conversation_context_text(
+    conversation_context: list[Mapping[str, object]],
+    *,
+    role: str | None = None,
+) -> str:
+    parts: list[str] = []
+    for item in conversation_context:
+        if role is not None and item.get("role") != role:
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            parts.append(content)
+    return "\n".join(parts)
+
+
+def _latest_user_novel_background(
+    conversation_context: list[Mapping[str, object]],
+    *,
+    current_message: str,
+) -> str:
+    current = current_message.strip()
+    for item in reversed(conversation_context):
+        if item.get("role") != "user":
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content or content == current:
+            continue
+        background = _extract_novel_background(content)
+        if background:
+            return background
+    return ""
+
+
 def _direct_compound_config_response(
     *,
     user_message: str,
@@ -1122,9 +1175,7 @@ def _direct_model_profile_copy_response(
     conversation_context: list[Mapping[str, object]],
     profile_store: ModelProfileStore,
 ) -> tuple[str, AgentActionDraft | None] | None:
-    context_text = "\n".join(
-        str(item.get("content") or "") for item in conversation_context
-    )
+    context_text = _conversation_context_text(conversation_context, role="user")
     current_request = _looks_like_model_profile_copy_request(user_message)
     contextual_confirmation = (
         _looks_like_model_profile_copy_request(context_text)
@@ -1157,6 +1208,12 @@ def _direct_model_profile_copy_response(
     provider_model_id = _extract_provider_model_id_override(user_message)
     if provider_model_id is None:
         provider_model_id = _extract_provider_model_id_override(request_text)
+    if provider_model_id is None:
+        provider_model_id = _infer_provider_model_id_from_copy_request(
+            source,
+            display_name=display_name,
+            text=request_text,
+        )
     if _requests_different_provider_model_id(user_message) and not provider_model_id:
         return (
             (
@@ -1236,7 +1293,10 @@ def _direct_glossary_extraction_response(
         )
     novel_background = _extract_novel_background(user_message)
     if not novel_background and contextual_continuation:
-        novel_background = _extract_novel_background(extraction_text)
+        novel_background = _latest_user_novel_background(
+            conversation_context,
+            current_message=user_message,
+        )
     if not novel_background:
         return (
             "我理解你想提取术语。请再提供小说背景，这会进入本次任务配置，不会写入手动设置页。",
@@ -1293,37 +1353,30 @@ def _direct_glossary_review_response(
     state: AgentWorkspaceState,
     current_state: Mapping[str, object],
 ) -> tuple[str, AgentActionDraft | None] | None:
-    if not _looks_like_glossary_review_request(user_message):
+    if not (
+        _looks_like_glossary_review_request(user_message)
+        or _looks_like_glossary_review_followup_request(user_message, current_state)
+    ):
         return None
-    context_text = "\n".join(
-        str(item.get("content") or "") for item in conversation_context
-    )
-    task_id = _extract_glossary_task_id(user_message) or _extract_glossary_task_id(
-        context_text
+    context_text = _conversation_context_text(conversation_context)
+    task_id = (
+        _extract_glossary_task_id(user_message)
+        or _extract_glossary_task_id(context_text)
+        or _latest_completed_glossary_task_id(current_state)
     )
     if not task_id:
         return (
-            "我理解你想启动术语审查。请提供已完成的 glossary task ID，例如 glossary-xxxxxxxxxxxx。",
+            "我理解你想启动术语审查。请提供已完成的 glossary task ID，或先完成一次术语提取任务。",
             None,
         )
-    combined_text = "\n".join((context_text, user_message))
-    novel_background = _extract_novel_background(user_message) or _extract_novel_background(
-        combined_text
-    )
-    source_language = _extract_source_language(user_message) or _settings_default_value(
-        current_state,
-        "glossary_review",
-        "source_language",
-    )
-    target_language = _extract_target_language(user_message) or _settings_default_value(
-        current_state,
-        "glossary_review",
-        "target_language",
+    novel_background = _extract_novel_background(
+        user_message
+    ) or _latest_user_novel_background(
+        conversation_context,
+        current_message=user_message,
     )
     payload: dict[str, object] = {
         "glossary_task_id": task_id,
-        "source_language": source_language,
-        "target_language": target_language,
     }
     if novel_background:
         payload["novel_background"] = novel_background
@@ -1347,7 +1400,7 @@ def _direct_glossary_review_response(
     return (
         (
             f"我已准备好术语审查任务草案，会读取术语提取任务 {task_id} 的输出产物。"
-            "请确认后再启动；本次背景和语言只作为任务覆盖项，不会写入手动设置。"
+            "请确认后再启动；本次背景只作为任务覆盖项，不会写入手动设置。"
         ),
         draft,
     )
@@ -1360,7 +1413,11 @@ def _direct_translation_response(
     state: AgentWorkspaceState,
     current_state: Mapping[str, object],
 ) -> tuple[str, AgentActionDraft | None] | None:
-    if not _looks_like_translation_task_request(user_message):
+    followup_request = _looks_like_translation_after_review_followup_request(
+        user_message,
+        current_state,
+    )
+    if not _looks_like_translation_task_request(user_message) and not followup_request:
         return None
     context_text = "\n".join(
         str(item.get("content") or "") for item in conversation_context
@@ -1371,6 +1428,11 @@ def _direct_translation_response(
         input_dir, output_dir, _ = _extract_glossary_task_dirs(combined_text)
     if not input_dir:
         if not _extract_absolute_path_candidates(combined_text):
+            if followup_request:
+                return (
+                    "我理解你已经确认术语表，下一步是启动翻译。请提供 input 目录和一个独立的 output 目录；翻译输出不能默认写回输入目录。",
+                    None,
+                )
             return None
         return (
             "我理解你想启动翻译。请提供 input 目录和一个独立的 output 目录；翻译输出不能默认写回输入目录。",
@@ -1402,11 +1464,24 @@ def _direct_translation_response(
         "source_language": source_language,
         "target_language": target_language,
     }
-    glossary_task_id = _extract_glossary_task_id(user_message) or _extract_glossary_task_id(
-        context_text
+    glossary_review_task_id = (
+        _extract_glossary_review_task_id(user_message)
+        or _extract_glossary_review_task_id(context_text)
+        or (
+            _latest_completed_glossary_review_task_id(current_state)
+            if (_asks_for_reviewed_glossary(combined_text) or followup_request)
+            else None
+        )
     )
-    if glossary_task_id:
-        payload["glossary_task_id"] = glossary_task_id
+    glossary_task_id = None
+    if glossary_review_task_id:
+        payload["glossary_review_task_id"] = glossary_review_task_id
+    else:
+        glossary_task_id = _extract_glossary_task_id(
+            user_message
+        ) or _extract_glossary_task_id(context_text)
+        if glossary_task_id:
+            payload["glossary_task_id"] = glossary_task_id
     completeness = assess_start_draft(
         draft_kind="start_translation_task",
         state=state,
@@ -1419,7 +1494,9 @@ def _direct_translation_response(
             None,
         )
     glossary_note = (
-        f"并引用术语提取任务 {glossary_task_id} 的术语表。"
+        f"并引用术语审查任务 {glossary_review_task_id} 的确认术语表。"
+        if glossary_review_task_id
+        else f"并引用术语提取任务 {glossary_task_id} 的术语表。"
         if glossary_task_id
         else "不引用历史术语任务，使用当前翻译设置中的术语表。"
     )
@@ -1438,51 +1515,648 @@ def _direct_translation_response(
     )
 
 
-def _looks_like_translation_task_request(text: str) -> bool:
+def _direct_stage_status_response(
+    *,
+    user_message: str,
+    current_state: Mapping[str, object],
+    task_service: TaskService,
+) -> tuple[str, None] | None:
+    direct = _direct_glossary_stage_status_response(
+        user_message=user_message,
+        current_state=current_state,
+        task_service=task_service,
+    )
+    if direct is not None:
+        return direct
+    return _direct_translation_status_response(
+        user_message=user_message,
+        current_state=current_state,
+        task_service=task_service,
+    )
+
+
+def _direct_glossary_stage_status_response(
+    *,
+    user_message: str,
+    current_state: Mapping[str, object],
+    task_service: TaskService,
+) -> tuple[str, None] | None:
+    requested_kind = _requested_glossary_status_kind(user_message, current_state)
+    if requested_kind is None:
+        return None
+
+    if requested_kind == "glossary_review":
+        task_id = _extract_glossary_review_task_id(user_message) or _latest_task_id(
+            current_state,
+            kind="glossary_review",
+        )
+        label = "术语审查"
+        missing = "我还没有找到最近的术语审查任务记录。请提供 glossary-review- 开头的任务 ID，或先启动术语审查。"
+        task_kind = TaskKind.GLOSSARY_REVIEW
+    else:
+        task_id = _extract_glossary_task_id(user_message) or _latest_task_id(
+            current_state,
+            kind="glossary",
+        )
+        label = "术语提取"
+        missing = "我还没有找到最近的术语提取任务记录。请提供 glossary- 开头的任务 ID，或先启动术语提取。"
+        task_kind = TaskKind.GLOSSARY
+    if not task_id:
+        return missing, None
+
+    try:
+        record = task_service.cache.load_record(task_id)
+    except (TaskNotFoundError, ValueError, OSError):
+        return (f"我没有找到{label}任务 {task_id}。请确认任务 ID 是否正确。", None)
+    if record.kind is not task_kind:
+        return (f"{task_id} 不是{label}任务，不能按{label}进度读取。", None)
+    status = record.status.value
+
+    artifacts: Mapping[str, object] = {}
+    try:
+        raw_artifacts = task_service.read_artifacts(kind=requested_kind, task_id=task_id)
+        if isinstance(raw_artifacts, Mapping):
+            artifacts = raw_artifacts
+    except BridgeError:
+        artifacts = {}
+
+    if requested_kind == "glossary_review":
+        return _format_glossary_review_status_response(
+            task_id=task_id,
+            status=status,
+            artifacts=artifacts,
+        ), None
+    return _format_glossary_status_response(
+        task_id=task_id,
+        status=status,
+        artifacts=artifacts,
+    ), None
+
+
+def _direct_translation_status_response(
+    *,
+    user_message: str,
+    current_state: Mapping[str, object],
+    task_service: TaskService,
+) -> tuple[str, None] | None:
+    if not _looks_like_translation_status_query(user_message):
+        return None
+    task_id = _extract_translation_task_id(user_message) or _latest_translation_task_id(
+        current_state
+    )
+    if not task_id:
+        return (
+            "我还没有找到最近的翻译任务记录。请提供 translation- 开头的任务 ID，或先启动一次翻译任务。",
+            None,
+        )
+    try:
+        record = task_service.cache.load_record(task_id)
+    except (TaskNotFoundError, ValueError, OSError):
+        return (f"我没有找到翻译任务 {task_id}。请确认任务 ID 是否正确。", None)
+    if record.kind is not TaskKind.TRANSLATION:
+        return (f"{task_id} 不是翻译任务，不能按翻译进度读取。", None)
+
+    artifacts: Mapping[str, object] = {}
+    try:
+        raw_artifacts = task_service.read_artifacts(kind="translation", task_id=task_id)
+        if isinstance(raw_artifacts, Mapping):
+            artifacts = raw_artifacts
+    except BridgeError:
+        artifacts = {}
+    statistics = _read_translation_statistics(artifacts)
+    completed_segments = _coerce_int(
+        statistics.get("completed_segments")
+        if statistics
+        else artifacts.get("completed_segments")
+    )
+    total_segments = _coerce_int(
+        statistics.get("total_segments") if statistics else artifacts.get("total_segments")
+    )
+    failed_subtasks = _coerce_int(statistics.get("failed_subtasks") if statistics else None)
+    low_confidence_raw = statistics.get("low_confidence_segments") if statistics else None
+    low_confidence_count = _low_confidence_count(low_confidence_raw)
+    low_confidence_examples = _low_confidence_examples(low_confidence_raw)
+    translated_files = _string_list(
+        artifacts.get("translated_files")
+        or artifacts.get("output_files")
+        or (statistics.get("translated_outputs") if statistics else None)
+    )
+
+    status = record.status.value
+    lines = [f"最近的翻译任务 {task_id} 当前状态：{_task_status_label(status)}。"]
+    if completed_segments is not None and total_segments is not None:
+        lines.append(f"进度：{completed_segments}/{total_segments} 段。")
+    elif completed_segments is not None:
+        lines.append(f"已完成段数：{completed_segments}。")
+    if failed_subtasks is not None:
+        lines.append(f"失败子任务：{failed_subtasks}。")
+    if low_confidence_count is not None:
+        detail = f"低置信：{low_confidence_count} 条"
+        if low_confidence_examples:
+            detail += f"（示例：{', '.join(low_confidence_examples)}）"
+        lines.append(detail + "。")
+    else:
+        lines.append("我没有在该任务的统计文件里读到低置信数量。")
+    if translated_files:
+        lines.append(f"输出文件：{translated_files[0]}")
+    if status == TaskStatus.COMPLETED.value:
+        lines.append(
+            "下一步建议进入「翻译 > 校对」页面，选择这个任务，优先处理低置信、原文残留和疑似重复问题。"
+        )
+    elif status in {TaskStatus.RUNNING.value, TaskStatus.PENDING.value}:
+        lines.append("你可以在翻译 dashboard 查看实时进度；任务结束前 Agent Lab 不会再启动其他任务。")
+    else:
+        lines.append("如果需要继续处理，请先在对应 dashboard 查看错误或产物状态。")
+    return "\n".join(lines), None
+
+
+def _requested_glossary_status_kind(
+    text: str,
+    current_state: Mapping[str, object],
+) -> str | None:
     normalized = text.lower()
-    if _looks_like_glossary_review_request(text) or _looks_like_glossary_extraction_request(
-        text
-    ):
-        return False
-    if any(marker in normalized for marker in ("prompt", "提示词", "预设")) and not any(
+    if not _looks_like_stage_status_query(normalized):
+        return None
+    if _extract_glossary_review_task_id(text):
+        return "glossary_review"
+    if _extract_glossary_task_id(text):
+        return "glossary"
+    has_review_context = any(
         marker in normalized
         for marker in (
-            "开始翻译",
-            "启动翻译",
-            "执行翻译",
-            "翻译任务",
-            "run translation",
-            "start translation",
+            "术语审查",
+            "术语审核",
+            "术语复审",
+            "审核术语",
+            "审查术语",
+            "复审术语",
+            "glossary review",
+            "review glossary",
+            "glossary-review",
         )
-    ):
+    )
+    has_extract_context = any(
+        marker in normalized
+        for marker in (
+            "术语提取",
+            "术语抽取",
+            "提取术语",
+            "抽取术语",
+            "处理术语",
+            "整理术语",
+            "glossary extraction",
+            "glossary task",
+        )
+    )
+    if has_review_context:
+        return "glossary_review"
+    if has_extract_context:
+        return "glossary"
+    if "术语" not in normalized and "glossary" not in normalized:
+        return None
+    return _latest_status_kind(current_state, kinds=("glossary_review", "glossary"))
+
+
+def _looks_like_stage_status_query(normalized: str) -> bool:
+    return any(
+        marker in normalized
+        for marker in (
+            "完成了吗",
+            "完成了没",
+            "做完了吗",
+            "结束了吗",
+            "结束了没",
+            "是否完成",
+            "是否结束",
+            "状态",
+            "进度",
+            "下一步",
+            "现在到哪",
+            "进行到哪",
+            "做到哪",
+            "产物",
+            "结果",
+            "报告",
+            "哪里看",
+            "去哪个页面",
+            "去哪",
+            "status",
+            "progress",
+            "next",
+            "done?",
+            "finished?",
+        )
+    )
+
+
+def _latest_status_kind(
+    current_state: Mapping[str, object],
+    *,
+    kinds: tuple[str, ...],
+) -> str | None:
+    recent_by_kind = current_state.get("recent_task_summaries")
+    if not isinstance(recent_by_kind, Mapping):
+        return None
+    best_kind: str | None = None
+    best_updated = ""
+    for kind in kinds:
+        tasks = recent_by_kind.get(kind)
+        if not isinstance(tasks, list) or not tasks:
+            continue
+        item = tasks[0]
+        if not isinstance(item, Mapping):
+            continue
+        task_id = str(item.get("id") or "").strip()
+        if not task_id:
+            continue
+        updated_at = str(item.get("updated_at") or item.get("created_at") or "")
+        if best_kind is None or updated_at >= best_updated:
+            best_kind = kind
+            best_updated = updated_at
+    return best_kind
+
+
+def _latest_task_id(current_state: Mapping[str, object], *, kind: str) -> str | None:
+    recent_by_kind = current_state.get("recent_task_summaries")
+    if not isinstance(recent_by_kind, Mapping):
+        return None
+    tasks = recent_by_kind.get(kind)
+    if not isinstance(tasks, list):
+        return None
+    for item in tasks:
+        if not isinstance(item, Mapping):
+            continue
+        task_id = str(item.get("id") or "").strip()
+        if task_id:
+            return task_id
+    return None
+
+
+def _format_glossary_status_response(
+    *,
+    task_id: str,
+    status: str,
+    artifacts: Mapping[str, object],
+) -> str:
+    statistics = _read_json_artifact(artifacts, "statistics_json_path")
+    candidate_count = _coerce_int(statistics.get("candidate_count"))
+    final_entry_count = _coerce_int(statistics.get("final_entry_count"))
+    processed_files = _string_list(statistics.get("processed_files"))
+    per_novel = artifacts.get("per_novel_artifacts")
+    artifact_count = len(per_novel) if isinstance(per_novel, list) else None
+    combined = artifacts.get("combined_artifact")
+    combined_xlsx = None
+    if isinstance(combined, Mapping):
+        raw_path = combined.get("xlsx_path")
+        if isinstance(raw_path, str) and raw_path.strip():
+            combined_xlsx = raw_path.strip()
+
+    lines = [f"最近的术语提取任务 {task_id} 当前状态：{_task_status_label(status)}。"]
+    if processed_files:
+        lines.append(f"处理文件：{len(processed_files)} 个。")
+    if candidate_count is not None:
+        lines.append(f"候选术语：{candidate_count} 条。")
+    if final_entry_count is not None:
+        lines.append(f"最终术语：{final_entry_count} 条。")
+    elif artifact_count is not None:
+        lines.append(f"已生成术语产物：{artifact_count} 份。")
+    if combined_xlsx:
+        lines.append(f"合并术语表：{combined_xlsx}")
+    if status == TaskStatus.COMPLETED.value:
+        lines.append(
+            "下一步建议启动「术语审查」任务。我可以基于这个 glossary task ID 生成术语审查草案，仍然需要你确认后才会执行。"
+        )
+    elif status in {TaskStatus.RUNNING.value, TaskStatus.PENDING.value}:
+        lines.append("你可以在术语提取 dashboard 查看实时进度；任务结束前 Agent Lab 不会再启动其他任务。")
+    else:
+        lines.append("如果需要继续处理，请先在术语提取 dashboard 查看错误和产物状态。")
+    return "\n".join(lines)
+
+
+def _format_glossary_review_status_response(
+    *,
+    task_id: str,
+    status: str,
+    artifacts: Mapping[str, object],
+) -> str:
+    changed_count = _coerce_int(artifacts.get("changed_count"))
+    output_path = artifacts.get("output_path")
+    report_path = artifacts.get("report_path")
+    lines = [f"最近的术语审查任务 {task_id} 当前状态：{_task_status_label(status)}。"]
+    if changed_count is not None:
+        lines.append(f"模型审查修改：{changed_count} 条。")
+    if isinstance(output_path, str) and output_path.strip():
+        lines.append(f"确认术语表：{output_path.strip()}")
+    if isinstance(report_path, str) and report_path.strip():
+        lines.append(f"审查报告：{report_path.strip()}")
+    if status == TaskStatus.COMPLETED.value:
+        lines.append(
+            "下一步建议进入「术语审查」页面的数据表校对区，人工确认术语表。确认无误后，可以在聊天里说“术语表已确认，用它翻译”，我再生成翻译任务草案。"
+        )
+    elif status in {TaskStatus.RUNNING.value, TaskStatus.PENDING.value}:
+        lines.append("你可以在术语审查 dashboard 查看实时进度；任务结束前 Agent Lab 不会再启动其他任务。")
+    else:
+        lines.append("如果需要继续处理，请先在术语审查 dashboard 查看错误、报告或最终表状态。")
+    return "\n".join(lines)
+
+
+def _looks_like_translation_status_query(text: str) -> bool:
+    normalized = text.lower()
+    has_translation_context = (
+        "翻译" in normalized
+        or "translation-" in normalized
+        or "低置信" in normalized
+        or "原文残留" in normalized
+        or "校对" in normalized
+        or "proofread" in normalized
+    )
+    if not has_translation_context:
         return False
     return any(
         marker in normalized
         for marker in (
-            "开始翻译",
-            "启动翻译",
-            "执行翻译",
-            "进行翻译",
-            "翻译任务",
-            "翻译小说",
-            "处理小说",
-            "run translation",
-            "start translation",
-            "translate novel",
-            "translate book",
+            "完成",
+            "结束",
+            "状态",
+            "进度",
+            "低置信",
+            "原文残留",
+            "下一步",
+            "哪里校对",
+            "去哪校对",
+            "校对页",
+            "proofread",
+            "status",
+            "progress",
         )
-    ) or (
+    )
+
+
+def _extract_translation_task_id(text: str) -> str | None:
+    match = re.search(r"\b(translation-[a-zA-Z0-9-]+)\b", text)
+    if match is None:
+        return None
+    return match.group(1).strip()
+
+
+def _latest_translation_task_id(current_state: Mapping[str, object]) -> str | None:
+    recent_by_kind = current_state.get("recent_task_summaries")
+    if not isinstance(recent_by_kind, Mapping):
+        return None
+    translation_tasks = recent_by_kind.get("translation")
+    if not isinstance(translation_tasks, list):
+        return None
+    for item in translation_tasks:
+        if not isinstance(item, Mapping):
+            continue
+        task_id = str(item.get("id") or "").strip()
+        if task_id:
+            return task_id
+    return None
+
+
+def _read_translation_statistics(
+    artifacts: Mapping[str, object],
+) -> Mapping[str, object]:
+    return _read_json_artifact(artifacts, "statistics_json_path")
+
+
+def _read_json_artifact(
+    artifacts: Mapping[str, object],
+    key: str,
+) -> Mapping[str, object]:
+    statistics_path = artifacts.get(key)
+    if not isinstance(statistics_path, str) or not statistics_path.strip():
+        return {}
+    path = Path(statistics_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, Mapping) else {}
+
+
+def _low_confidence_count(value: object) -> int | None:
+    if isinstance(value, list):
+        return len(value)
+    return _coerce_int(value)
+
+
+def _low_confidence_examples(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    examples: list[str] = []
+    for item in value[:3]:
+        if isinstance(item, Mapping):
+            segment_id = str(item.get("segment_id") or "").strip()
+            if segment_id:
+                examples.append(segment_id)
+        elif isinstance(item, str) and item.strip():
+            examples.append(item.strip())
+    return examples
+
+
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def _looks_like_translation_task_request(text: str) -> bool:
+    normalized = text.lower()
+    if re.search(
+        r"先\s*(?:提取|抽取|处理|整理)\s*术语(?:表)?",
+        normalized,
+    ):
+        return False
+    strong_translation_markers = (
+        "开始翻译",
+        "启动翻译",
+        "执行翻译",
+        "进行翻译",
+        "翻译任务",
+        "翻译小说",
+        "run translation",
+        "start translation",
+        "translate novel",
+        "translate book",
+    )
+    has_strong_translation_intent = any(
+        marker in normalized for marker in strong_translation_markers
+    )
+    has_task_input_context = bool(_extract_absolute_path_candidates(text)) or any(
+        marker in normalized
+        for marker in (
+            "input",
+            "output",
+            "输入目录",
+            "输出目录",
+            "输入路径",
+            "输出路径",
+            "epub",
+            ".epub",
+            "txt",
+            ".txt",
+            "目录",
+            "路径",
+        )
+    )
+    has_translation_task_context = (
         "翻译" in normalized
-        and bool(_extract_absolute_path_candidates(text))
+        and has_task_input_context
         and "模型配置" not in normalized
+    )
+    if (
+        _looks_like_glossary_review_request(text)
+        and not has_strong_translation_intent
+        and not has_translation_task_context
+    ):
+        return False
+    if any(marker in normalized for marker in ("prompt", "提示词", "预设")) and not any(
+        marker in normalized
+        for marker in strong_translation_markers
+    ):
+        return False
+    if (
+        _looks_like_glossary_extraction_request(text)
+        and not has_strong_translation_intent
+        and not has_translation_task_context
+    ):
+        return False
+    return has_strong_translation_intent or has_translation_task_context
+
+
+def _looks_like_translation_after_review_followup_request(
+    text: str,
+    current_state: Mapping[str, object],
+) -> bool:
+    if not _latest_completed_glossary_review_task_id(current_state):
+        return False
+    normalized = text.lower()
+    if any(marker in normalized for marker in ("prompt", "提示词", "预设", "模型配置")):
+        return False
+    if any(
+        marker in normalized
+        for marker in (
+            "完成了吗",
+            "完成了没",
+            "做完了吗",
+            "结束了吗",
+            "结束了没",
+            "是否完成",
+            "是否结束",
+            "状态",
+            "进度",
+            "哪里",
+            "哪个页面",
+            "我该做什么",
+            "status",
+            "progress",
+            "finished?",
+            "done?",
+        )
+    ):
+        return False
+    has_translation_or_next_intent = any(
+        marker in normalized
+        for marker in (
+            "翻译",
+            "继续",
+            "下一步",
+            "下一阶段",
+            "后续",
+            "接着",
+            "next",
+            "continue",
+            "translate",
+        )
+    )
+    if not has_translation_or_next_intent:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "术语表已确认",
+            "术语表已经确认",
+            "术语表确认",
+            "术语表确认好了",
+            "术语表确认无误",
+            "术语表没问题",
+            "术语确认",
+            "术语已经确认",
+            "术语确认好了",
+            "术语没问题",
+            "表没问题",
+            "确认好的术语",
+            "审查好的术语",
+            "审核好的术语",
+            "校对好的术语",
+            "reviewed glossary",
+            "confirmed glossary",
+        )
     )
 
 
 def _looks_like_glossary_review_request(text: str) -> bool:
     normalized = text.lower()
-    if not re.search(r"\bglossary-[a-z0-9-]+\b", normalized):
+    prompt_like = any(marker in normalized for marker in ("prompt", "提示词", "预设"))
+    task_like = any(
+        marker in normalized
+        for marker in (
+            "启动",
+            "开始",
+            "继续",
+            "执行",
+            "运行",
+            "跑",
+            "处理",
+            "刚才",
+            "最新",
+            "最近",
+            "已提取",
+            "提取结果",
+            "这个术语表",
+            "start",
+            "run",
+            "continue",
+            "task",
+            "workflow",
+        )
+    )
+    has_task_id = bool(re.search(r"\bglossary-(?:review-)?[a-z0-9-]+\b", normalized))
+    if prompt_like and not (has_task_id or task_like):
         return False
-    return any(
+    has_review_marker = (
+        any(
+            action in normalized
+            for action in (
+                "审查",
+                "审核",
+                "校对",
+                "复审",
+                "审一遍",
+                "审一下",
+                "审一审",
+                "review",
+            )
+        )
+        and "术语" in normalized
+    ) or any(
         marker in normalized
         for marker in (
             "术语审查",
@@ -1494,17 +2168,148 @@ def _looks_like_glossary_review_request(text: str) -> bool:
             "glossary review",
         )
     )
+    return has_review_marker and (has_task_id or task_like)
+
+
+def _looks_like_glossary_review_followup_request(
+    text: str,
+    current_state: Mapping[str, object],
+) -> bool:
+    if not _latest_completed_glossary_task_id(current_state):
+        return False
+    normalized = text.lower()
+    if any(marker in normalized for marker in ("prompt", "提示词", "预设", "模型配置")):
+        return False
+    if any(
+        marker in normalized
+        for marker in (
+            "完成了吗",
+            "完成了没",
+            "做完了吗",
+            "结束了吗",
+            "结束了没",
+            "是否完成",
+            "是否结束",
+            "状态",
+            "进度",
+            "哪里",
+            "哪个页面",
+            "我该做什么",
+            "status",
+            "progress",
+            "finished?",
+            "done?",
+        )
+    ):
+        return False
+    if _looks_like_translation_task_request(text):
+        return False
+    has_continue_intent = any(
+        marker in normalized
+        for marker in (
+            "继续",
+            "下一步",
+            "下一阶段",
+            "后续",
+            "接着",
+            "往后",
+            "next",
+            "continue",
+        )
+    )
+    if not has_continue_intent:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "术语",
+            "glossary",
+            "workflow",
+            "流程",
+            "任务",
+            "刚才",
+            "最新",
+            "最近",
+            "提取完成",
+            "提取完",
+            "跑完",
+            "完成了",
+        )
+    )
 
 
 def _extract_glossary_task_id(text: str) -> str | None:
-    match = re.search(r"\b(glossary-[a-zA-Z0-9-]+)\b", text)
+    match = re.search(r"\b(glossary-(?!review-)[a-zA-Z0-9-]+)\b", text)
     if match is None:
         return None
     return match.group(1).strip()
 
 
+def _extract_glossary_review_task_id(text: str) -> str | None:
+    match = re.search(r"\b(glossary-review-[a-zA-Z0-9-]+)\b", text)
+    if match is None:
+        return None
+    return match.group(1).strip()
+
+
+def _latest_completed_glossary_task_id(current_state: Mapping[str, object]) -> str | None:
+    recent_by_kind = current_state.get("recent_task_summaries")
+    if not isinstance(recent_by_kind, Mapping):
+        return None
+    glossary_tasks = recent_by_kind.get("glossary")
+    if not isinstance(glossary_tasks, list):
+        return None
+    for item in glossary_tasks:
+        if not isinstance(item, Mapping):
+            continue
+        task_id = str(item.get("id") or "").strip()
+        status = str(item.get("status") or "").strip().lower()
+        if task_id and status == "completed" and bool(item.get("artifact_available")):
+            return task_id
+    return None
+
+
+def _latest_completed_glossary_review_task_id(
+    current_state: Mapping[str, object],
+) -> str | None:
+    recent_by_kind = current_state.get("recent_task_summaries")
+    if not isinstance(recent_by_kind, Mapping):
+        return None
+    review_tasks = recent_by_kind.get("glossary_review")
+    if not isinstance(review_tasks, list):
+        return None
+    for item in review_tasks:
+        if not isinstance(item, Mapping):
+            continue
+        task_id = str(item.get("id") or "").strip()
+        status = str(item.get("status") or "").strip().lower()
+        if task_id and (status == "completed" or bool(item.get("artifact_available"))):
+            return task_id
+    return None
+
+
+def _asks_for_reviewed_glossary(text: str) -> bool:
+    normalized = text.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "审查好的术语",
+            "审核好的术语",
+            "校对好的术语",
+            "确认好的术语",
+            "审查后的术语",
+            "审核后的术语",
+            "校对后的术语",
+            "reviewed glossary",
+            "confirmed glossary",
+        )
+    )
+
+
 def _looks_like_glossary_extraction_request(text: str) -> bool:
     normalized = text.lower()
+    if _looks_like_glossary_review_request(text):
+        return False
     if any(marker in normalized for marker in ("prompt", "提示词", "预设")) and not re.search(
         r"/|input|output|输入|输出|目录|路径",
         text,
@@ -1517,6 +2322,23 @@ def _looks_like_glossary_extraction_request(text: str) -> bool:
             "提取术语",
             "术语提取",
             "处理术语",
+            "处理术语表",
+            "整理术语",
+            "整理术语表",
+            "跑术语",
+            "跑术语表",
+            "术语表 workflow",
+            "术语 workflow",
+            "完整 workflow",
+            "整套 workflow",
+            "完整流程",
+            "整套流程",
+            "跑流程",
+            "处理小说",
+            "处理这本小说",
+            "数据表提取",
+            "处理数据表",
+            "关键词和术语表",
             "抽取术语",
             "extract glossary",
             "glossary extraction",
@@ -1571,6 +2393,8 @@ def _should_discard_pending_for_new_message(text: str) -> bool:
             "保存",
             "启动",
             "开始",
+            "继续",
+            "下一步",
             "提取",
             "处理术语",
             "create",
@@ -1598,7 +2422,31 @@ def _extract_glossary_task_dirs(text: str) -> tuple[str, str | None, bool]:
         output_dir = candidates[1]
     if input_dir is None:
         return "", output_dir, False
+    if output_dir is None:
+        output_dir = _infer_sibling_output_dir(text, input_dir)
     return input_dir, output_dir, output_dir is None
+
+
+def _infer_sibling_output_dir(text: str, input_dir: str) -> str | None:
+    normalized = text.lower()
+    output_markers = (
+        "output 里",
+        "output里",
+        "output 文件夹",
+        "output文件夹",
+        "output 目录",
+        "output目录",
+        "输出放 output",
+        "输出到 output",
+        "结果放 output",
+        "结果到 output",
+    )
+    if not any(marker in normalized for marker in output_markers):
+        return None
+    path = Path(input_dir).expanduser()
+    if path.name.lower() != "input":
+        return None
+    return str(path.parent / "output")
 
 
 def _extract_labeled_path(text: str, labels: tuple[str, ...]) -> str | None:
@@ -1622,6 +2470,12 @@ def _extract_absolute_path_candidates(text: str) -> list[str]:
 
 def _trim_path_like_value(value: str) -> str:
     trimmed = value.strip(" \t\r\n`\"'“”")
+    guide_match = re.search(
+        r"\s+(?:BL\s*)?作品指南\b|\s+(?:小说背景|作品背景|背景/类型|背景|类型|作品关键词|人物介绍|角色介绍)\b",
+        trimmed,
+    )
+    if guide_match is not None:
+        trimmed = trimmed[: guide_match.start()]
     stop_markers = (
         " output",
         " input",
@@ -1651,6 +2505,12 @@ def _trim_path_like_value(value: str) -> str:
         "。作品关键词",
         "，作品关键词",
         "；作品关键词",
+        "。作品指南",
+        "，作品指南",
+        "；作品指南",
+        "。BL 作品指南",
+        "，BL 作品指南",
+        "；BL 作品指南",
         "。人物介绍",
         "，人物介绍",
         "；人物介绍",
@@ -1658,6 +2518,8 @@ def _trim_path_like_value(value: str) -> str:
         " 背景",
         " 类型",
         " 作品关键词",
+        " 作品指南",
+        " BL 作品指南",
         " 人物介绍",
         "\n",
     )
@@ -1966,6 +2828,35 @@ def _extract_provider_model_id_override(text: str) -> str | None:
             value = match.group(1).strip()
             if value:
                 return value[:_MAX_TITLE_LENGTH]
+    return None
+
+
+def _infer_provider_model_id_from_copy_request(
+    source: ModelConfig,
+    *,
+    display_name: str,
+    text: str,
+) -> str | None:
+    if not _requests_different_provider_model_id(text):
+        return None
+    source_model_id = source.model_id.strip()
+    if not source_model_id:
+        return None
+    target = display_name.lower()
+    if "pro" in target and re.search(r"(?:^|[-_.])flash(?:$|[-_.])", source_model_id):
+        return re.sub(
+            r"(?i)(?:^|(?<=[-_.]))flash(?=$|[-_.])",
+            "pro",
+            source_model_id,
+            count=1,
+        )[:_MAX_TITLE_LENGTH]
+    if "flash" in target and re.search(r"(?:^|[-_.])pro(?:$|[-_.])", source_model_id):
+        return re.sub(
+            r"(?i)(?:^|(?<=[-_.]))pro(?=$|[-_.])",
+            "flash",
+            source_model_id,
+            count=1,
+        )[:_MAX_TITLE_LENGTH]
     return None
 
 
@@ -2395,13 +3286,13 @@ def _applied_draft_message(
             f"已启动{summary['label']}任务。\n"
             f"任务 ID：{summary['task_id']}\n"
             f"当前进度阶段：{summary['status']}。\n"
-            f"你可以在{summary['dashboard']}查看实时进度。任务结束前，Agent Lab 不会再启动其他任务。"
+            f"你可以在 {summary['dashboard']} 查看实时进度。任务结束前，Agent Lab 不会再启动其他任务。"
         )
     lines = [f"已应用草案：{draft.title}", "", "已启动以下任务："]
     for summary in task_summaries:
         lines.append(
             f"- {summary['label']}：{summary['task_id']}，当前阶段：{summary['status']}，"
-            f"可在{summary['dashboard']}查看。"
+            f"可在 {summary['dashboard']} 查看。"
         )
     lines.append("任务结束前，Agent Lab 不会再启动其他任务。")
     return "\n".join(lines)
@@ -2785,12 +3676,15 @@ def _validate_compound_config_action(
     **_: object,
 ) -> None:
     validation_state = state
+    validation_profile_store: ModelProfileStore | _PreviewModelProfileStore = (
+        profile_store
+    )
     for inner in _coerce_compound_action_drafts(draft.payload):
         spec = _agent_action_spec(inner.kind)
         spec.validate(
             inner,
             state=validation_state,
-            profile_store=profile_store,
+            profile_store=validation_profile_store,  # type: ignore[arg-type]
             cache_root=cache_root,
             settings_store=settings_store,
             task_service=task_service,
@@ -2798,8 +3692,12 @@ def _validate_compound_config_action(
         validation_state = _preview_compound_state(
             validation_state,
             inner,
-            profile_store=profile_store,
+            profile_store=validation_profile_store,  # type: ignore[arg-type]
             cache_root=cache_root,
+        )
+        validation_profile_store = _preview_compound_profile_store(
+            validation_profile_store,
+            inner,
         )
 
 
@@ -2932,7 +3830,7 @@ def _preview_compound_state(
     state: AgentWorkspaceState,
     draft: AgentActionDraft,
     *,
-    profile_store: ModelProfileStore,
+    profile_store: ModelProfileStore | "_PreviewModelProfileStore",
     cache_root: Path,
 ) -> AgentWorkspaceState:
     if draft.kind == "update_workspace":
@@ -3002,6 +3900,64 @@ def _preview_compound_state(
         recipe = _require_recipe_from_payload(draft.payload, state=state)
         return state.remove_recipe(recipe.id)
     return state
+
+
+class _PreviewModelProfileStore:
+    """Validation-only overlay for compound drafts.
+
+    Compound proposals can create or update a model profile and then reference it
+    in a later action. Validation needs to see those earlier changes without
+    writing them to disk before the user confirms the whole draft.
+    """
+
+    def __init__(
+        self,
+        base: ModelProfileStore | "_PreviewModelProfileStore",
+        overlay: Mapping[str, ModelConfig],
+    ) -> None:
+        self._base = base
+        self._overlay = dict(overlay)
+
+    def get(self, profile_id: str) -> ModelConfig | None:
+        if profile_id in self._overlay:
+            return self._overlay[profile_id]
+        return self._base.get(profile_id)
+
+    def load(self) -> tuple[ModelConfig, ...]:
+        base_profiles = {
+            profile.id: profile
+            for profile in self._base.load()
+            if profile.id not in self._overlay
+        }
+        return (*base_profiles.values(), *self._overlay.values())
+
+
+def _preview_compound_profile_store(
+    profile_store: ModelProfileStore | _PreviewModelProfileStore,
+    draft: AgentActionDraft,
+) -> ModelProfileStore | _PreviewModelProfileStore:
+    if draft.kind == "create_model_profile":
+        profile = _model_profile_from_draft_payload(
+            draft.payload,
+            profile_store=profile_store,  # type: ignore[arg-type]
+        )
+        return _PreviewModelProfileStore(profile_store, {profile.id: profile})
+    if draft.kind != "update_model_profile":
+        return profile_store
+
+    profile_id, patch, api_keys = _coerce_model_profile_update_payload(draft.payload)
+    current = profile_store.get(profile_id)
+    if current is None:
+        return profile_store
+    updated = current
+    if patch:
+        updated = replace(
+            updated,
+            **_coerce_model_profile_patch(patch),  # type: ignore[arg-type]
+        )
+    if api_keys is not None:
+        updated = updated.with_api_keys(_coerce_api_keys(api_keys))
+    return _PreviewModelProfileStore(profile_store, {profile_id: updated})
 
 
 def _validate_workspace_action(
@@ -3434,11 +4390,17 @@ def _apply_start_task_action(
 def _load_with_reconciled_active_task(
     project_store: AgentProjectStore,
     task_service: TaskService,
+    *,
+    reconcile_stale: bool = True,
 ) -> AgentWorkspaceState:
     state = project_store.load()
     if state.active_task is None:
         return state
-    if _active_task_is_terminal(state.active_task, task_service):
+    if _active_task_is_terminal(
+        state.active_task,
+        task_service,
+        reconcile_stale=reconcile_stale,
+    ):
         return project_store.save(state.clear_active_task())
     return state
 
@@ -3446,6 +4408,8 @@ def _load_with_reconciled_active_task(
 def _active_task_is_terminal(
     active_task: AgentActiveTask,
     task_service: TaskService,
+    *,
+    reconcile_stale: bool,
 ) -> bool:
     terminal_statuses = {
         TaskStatus.COMPLETED,
@@ -3459,7 +4423,7 @@ def _active_task_is_terminal(
     else:
         if record.status in terminal_statuses:
             return True
-        if record.status is not TaskStatus.STOPPING:
+        if not reconcile_stale:
             return False
 
     try:
@@ -3508,6 +4472,11 @@ def _validate_glossary_task_reference(
 ) -> None:
     if draft.kind not in {"start_glossary_review_task", "start_translation_task"}:
         return
+    if draft.kind == "start_translation_task":
+        review_task_id = draft.payload.get("glossary_review_task_id")
+        if isinstance(review_task_id, str) and review_task_id.strip():
+            task_service.read_glossary_review_final(task_id=review_task_id.strip())
+            return
     task_id = draft.payload.get("glossary_task_id")
     if task_id is None and draft.kind == "start_translation_task":
         return
@@ -4489,6 +5458,54 @@ def _recent_task_summaries(
                 "updated_at": str(item.get("updated_at") or ""),
                 "artifact_available": bool(availability["available"]),
                 "artifact_keys": list(availability["artifact_keys"]),
+            }
+        )
+    return summaries
+
+
+def _task_status_context(task_service: TaskService) -> dict[str, object]:
+    return {
+        "recent_task_summaries": {
+            task_kind: _recent_task_headers(
+                task_service,
+                kind=task_kind,
+                limit=3,
+            )
+            for task_kind in _AGENT_TASK_KINDS
+        }
+    }
+
+
+def _recent_task_headers(
+    task_service: TaskService,
+    *,
+    kind: str,
+    limit: int,
+) -> list[dict[str, object]]:
+    listing = task_service.list_recent_tasks(kind=kind, limit=limit)
+    tasks = listing.get("tasks")
+    if not isinstance(tasks, list):
+        return []
+    summaries: list[dict[str, object]] = []
+    for item in tasks:
+        if not isinstance(item, Mapping):
+            continue
+        task_id = str(item.get("id", "")).strip()
+        if not task_id:
+            continue
+        availability = _artifact_availability(
+            task_service,
+            kind=kind,
+            task_id=task_id,
+        )
+        summaries.append(
+            {
+                "id": task_id,
+                "kind": str(item.get("kind") or kind),
+                "status": str(item.get("status") or ""),
+                "created_at": str(item.get("created_at") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+                "artifact_available": bool(availability.get("available")),
             }
         )
     return summaries

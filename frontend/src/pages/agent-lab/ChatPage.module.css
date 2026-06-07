@@ -1,8 +1,37 @@
 .page {
+  --agent-chat-main: #ffffff;
+  --agent-chat-stream: #ffffff;
+  --agent-chat-user: #f8f6ef;
+  --agent-chat-assistant: #f3f2ec;
+  --agent-chat-control: #f7f6f1;
+  --agent-chat-popup: #ffffff;
+  --agent-chat-disabled: rgb(15 15 18 / 42%);
+  --agent-chat-border: var(--hairline);
+  --agent-chat-border-strong: var(--hairline-strong);
+  --agent-chat-button-hover: var(--panel-soft);
+  --agent-chat-shadow: 0 18px 42px rgb(0 0 0 / 8%);
+
   display: flex;
   flex-direction: column;
   gap: 14px;
   min-height: 100%;
+}
+
+:global([data-theme='dark']) .page,
+:global(:root[data-theme='dark']) .page {
+  --agent-chat-main: #181611;
+  --agent-chat-stream: #181611;
+  --agent-chat-user: #29251e;
+  --agent-chat-assistant: #231f19;
+  --agent-chat-control: #211e18;
+  --agent-chat-popup: #29251e;
+  --agent-chat-disabled: rgb(245 241 232 / 52%);
+  --agent-chat-border: rgb(232 219 190 / 16%);
+  --agent-chat-border-strong: rgb(232 219 190 / 28%);
+  --agent-chat-button-hover: #302b23;
+  --agent-chat-shadow: 0 18px 42px rgb(0 0 0 / 28%);
+
+  color-scheme: dark;
 }
 
 .error {
@@ -38,6 +67,11 @@
   border-right: 1px solid var(--hairline);
   padding-right: 10px;
   min-height: 0;
+}
+
+:global([data-theme='dark']) .historyPane,
+:global(:root[data-theme='dark']) .historyPane {
+  border-right-color: var(--agent-chat-border);
 }
 
 .historyPaneCollapsed {
@@ -88,8 +122,8 @@
   gap: 6px;
   border: 1px solid var(--hairline);
   border-radius: 999px;
-  background: var(--ink);
-  color: #fff;
+  background: var(--action);
+  color: var(--action-fg);
   padding: 6px 10px;
   font: inherit;
   font-size: 12px;
@@ -114,6 +148,14 @@
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
+}
+
+:global([data-theme='dark']) .collapsedCount,
+:global([data-theme='dark']) .convMeta,
+:global(:root[data-theme='dark']) .collapsedCount,
+:global(:root[data-theme='dark']) .convMeta {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
 }
 
 .paneHeader,
@@ -180,6 +222,22 @@
 .convActive {
   border-color: var(--accent, #5b6cff);
   background: var(--panel-soft);
+}
+
+:global([data-theme='dark']) .historyToggle,
+:global([data-theme='dark']) .convItem,
+:global([data-theme='dark']) .memoryItem,
+:global(:root[data-theme='dark']) .historyToggle,
+:global(:root[data-theme='dark']) .convItem,
+:global(:root[data-theme='dark']) .memoryItem {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
+}
+
+:global([data-theme='dark']) .convActive,
+:global(:root[data-theme='dark']) .convActive {
+  border-color: var(--accent);
+  background: var(--agent-chat-user);
 }
 
 .convTitle {
@@ -253,6 +311,12 @@
   font-size: 13px;
 }
 
+:global([data-theme='dark']) .inlineInput,
+:global(:root[data-theme='dark']) .inlineInput {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
+}
+
 .memoryBox {
   display: flex;
   flex-direction: column;
@@ -298,8 +362,30 @@
   overflow: hidden;
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: #fff;
+  background: var(--agent-chat-main);
   padding: 18px;
+  color: var(--ink);
+}
+
+:global([data-theme='dark']) .chatMain,
+:global(:root[data-theme='dark']) .chatMain {
+  border-color: var(--agent-chat-border);
+  background: #181611;
+  color: var(--ink);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 3%),
+    var(--agent-chat-shadow);
+}
+
+:global([data-theme='dark']) .topBar,
+:global(:root[data-theme='dark']) .topBar {
+  border-bottom-color: var(--agent-chat-border);
+}
+
+:global([data-theme='dark']) .manageButton,
+:global(:root[data-theme='dark']) .manageButton {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
 }
 
 .topBar {
@@ -342,8 +428,13 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   border-radius: 8px;
-  background: #fff;
+  background: var(--agent-chat-stream);
   padding: 10px 4px 10px 0;
+}
+
+:global([data-theme='dark']) .messages,
+:global(:root[data-theme='dark']) .messages {
+  background: #181611;
 }
 
 .messagesEnd {
@@ -355,16 +446,32 @@
   border: 1px solid var(--hairline);
   border-radius: 8px;
   padding: 10px 12px;
+  color: var(--ink);
+}
+
+:global([data-theme='dark']) .message,
+:global(:root[data-theme='dark']) .message {
+  border-color: var(--agent-chat-border);
 }
 
 .userMessage {
   align-self: flex-end;
-  background: var(--panel);
+  background: var(--agent-chat-user);
 }
 
 .agentMessage {
   align-self: flex-start;
-  background: var(--panel-soft);
+  background: var(--agent-chat-assistant);
+}
+
+:global([data-theme='dark']) .userMessage,
+:global(:root[data-theme='dark']) .userMessage {
+  background: var(--agent-chat-user);
+}
+
+:global([data-theme='dark']) .agentMessage,
+:global(:root[data-theme='dark']) .agentMessage {
+  background: var(--agent-chat-assistant);
 }
 
 .thinkingMessage {
@@ -400,11 +507,17 @@
 .thinkingSteps span {
   border: 1px solid var(--hairline);
   border-radius: 999px;
-  background: #fff;
+  background: var(--agent-chat-control);
   color: var(--muted);
   padding: 3px 8px;
   font-size: 11px;
   font-weight: 650;
+}
+
+:global([data-theme='dark']) .thinkingSteps span,
+:global(:root[data-theme='dark']) .thinkingSteps span {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
 }
 
 .processToggle {
@@ -497,6 +610,17 @@
   cursor: pointer;
 }
 
+.quickActions button:hover:not(:disabled) {
+  background: var(--agent-chat-button-hover);
+}
+
+:global([data-theme='dark']) .quickActions button,
+:global(:root[data-theme='dark']) .quickActions button {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
+  color: var(--accent);
+}
+
 .quickActions button:disabled {
   cursor: default;
   opacity: 0.55;
@@ -509,8 +633,14 @@
   overscroll-behavior: contain;
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: var(--panel);
+  background: var(--agent-chat-main);
   padding: 12px;
+}
+
+:global([data-theme='dark']) .draft,
+:global(:root[data-theme='dark']) .draft {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-assistant);
 }
 
 .draft h3 {
@@ -546,7 +676,7 @@
   align-items: center;
   border: 1px solid var(--hairline);
   border-radius: 999px;
-  background: #fff;
+  background: var(--agent-chat-control);
   color: var(--muted);
   padding: 3px 8px;
   font-size: 11px;
@@ -562,7 +692,7 @@
 .draftActionItem {
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: #fff;
+  background: var(--agent-chat-control);
   padding: 10px;
 }
 
@@ -593,8 +723,8 @@
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: var(--ink);
-  color: #fff;
+  background: var(--action);
+  color: var(--action-fg);
   font-size: 11px;
   font-weight: 700;
 }
@@ -642,8 +772,18 @@
 .draftTextDetails {
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: var(--panel-soft);
+  background: var(--agent-chat-control);
   padding: 8px 10px;
+}
+
+:global([data-theme='dark']) .draftTextDetails,
+:global([data-theme='dark']) .draftRawDetails pre,
+:global([data-theme='dark']) .draftActionItem,
+:global(:root[data-theme='dark']) .draftTextDetails,
+:global(:root[data-theme='dark']) .draftRawDetails pre,
+:global(:root[data-theme='dark']) .draftActionItem {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
 }
 
 .draftTextDetails summary {
@@ -657,6 +797,13 @@
   border-top: 1px solid var(--hairline);
   padding-top: 8px;
   white-space: pre-wrap;
+}
+
+:global([data-theme='dark']) .draftTextDetails div,
+:global([data-theme='dark']) .adjustBox,
+:global(:root[data-theme='dark']) .draftTextDetails div,
+:global(:root[data-theme='dark']) .adjustBox {
+  border-top-color: var(--agent-chat-border);
 }
 
 .draftMiniList {
@@ -689,7 +836,7 @@
   overflow: auto;
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: var(--panel-soft);
+  background: var(--agent-chat-control);
   padding: 10px;
   color: var(--ink);
   font-size: 11px;
@@ -722,11 +869,17 @@
   overflow-y: auto;
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: #fff;
+  background: var(--agent-chat-control);
   color: var(--ink);
   padding: 9px 10px;
   font: inherit;
   line-height: 1.5;
+}
+
+:global([data-theme='dark']) .adjustBox textarea,
+:global(:root[data-theme='dark']) .adjustBox textarea {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
 }
 
 .adjustActions {
@@ -743,6 +896,11 @@
   padding-top: 12px;
 }
 
+:global([data-theme='dark']) .composer,
+:global(:root[data-theme='dark']) .composer {
+  border-top-color: var(--agent-chat-border);
+}
+
 .composer textarea {
   min-height: 92px;
   max-height: 190px;
@@ -751,11 +909,22 @@
   border: 1px solid var(--hairline);
   border-bottom: 0;
   border-radius: 8px 8px 0 0;
-  background: #fff;
+  background: var(--agent-chat-control);
   color: var(--ink);
   padding: 10px 12px;
   font: inherit;
   line-height: 1.5;
+  opacity: 1;
+}
+
+:global([data-theme='dark']) .composer textarea,
+:global(:root[data-theme='dark']) .composer textarea {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
+}
+
+.composer textarea::placeholder {
+  color: var(--agent-chat-disabled);
 }
 
 .composerBar {
@@ -764,8 +933,14 @@
   border: 1px solid var(--hairline);
   border-top: 0;
   border-radius: 0 0 8px 8px;
-  background: #fff;
+  background: var(--agent-chat-control);
   padding: 8px;
+}
+
+:global([data-theme='dark']) .composerBar,
+:global(:root[data-theme='dark']) .composerBar {
+  border-color: var(--agent-chat-border);
+  background: var(--agent-chat-control);
 }
 
 .composerControls {
@@ -782,13 +957,21 @@
   min-height: 30px;
   border: 1px solid transparent;
   border-radius: 8px;
-  background: #f4f3f0;
+  background: var(--agent-chat-popup);
   color: var(--ink);
   padding: 0 9px;
   font: inherit;
   font-size: 12px;
   font-weight: 650;
   cursor: pointer;
+}
+
+:global([data-theme='dark']) .compactButton,
+:global([data-theme='dark']) .reasoningButton,
+:global(:root[data-theme='dark']) .compactButton,
+:global(:root[data-theme='dark']) .reasoningButton {
+  background: var(--agent-chat-popup);
+  color: var(--ink);
 }
 
 .compactButton {
@@ -809,10 +992,31 @@
   border-color: var(--hairline);
 }
 
+:global([data-theme='dark']) .compactButton:hover,
+:global([data-theme='dark']) .reasoningButton:hover,
+:global(:root[data-theme='dark']) .compactButton:hover,
+:global(:root[data-theme='dark']) .reasoningButton:hover {
+  border-color: var(--agent-chat-border-strong);
+  background: var(--agent-chat-button-hover);
+}
+
 .compactButton:disabled,
 .reasoningButton:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.composer textarea:disabled,
+.composerControls button:disabled {
+  color: var(--agent-chat-disabled);
+}
+
+:global([data-theme='dark']) .composer textarea:disabled,
+:global([data-theme='dark']) .composerControls button:disabled,
+:global(:root[data-theme='dark']) .composer textarea:disabled,
+:global(:root[data-theme='dark']) .composerControls button:disabled {
+  background: #1c1a16;
+  color: var(--agent-chat-disabled);
 }
 
 .compactMenu,
@@ -838,9 +1042,16 @@
   overscroll-behavior: contain;
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 18px 42px rgb(0 0 0 / 12%);
+  background: var(--agent-chat-popup);
+  box-shadow: var(--agent-chat-shadow);
   padding: 8px;
+}
+
+:global([data-theme='dark']) .reasoningPopup,
+:global(:root[data-theme='dark']) .reasoningPopup {
+  border-color: var(--agent-chat-border-strong);
+  background: var(--agent-chat-popup);
+  box-shadow: 0 18px 42px rgb(0 0 0 / 36%);
 }
 
 .compactPopup {
@@ -855,9 +1066,16 @@
   overscroll-behavior: contain;
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 18px 42px rgb(0 0 0 / 12%);
+  background: var(--agent-chat-popup);
+  box-shadow: var(--agent-chat-shadow);
   padding: 6px;
+}
+
+:global([data-theme='dark']) .compactPopup,
+:global(:root[data-theme='dark']) .compactPopup {
+  border-color: var(--agent-chat-border-strong);
+  background: var(--agent-chat-popup);
+  box-shadow: 0 18px 42px rgb(0 0 0 / 36%);
 }
 
 .reasoningHeading {
@@ -915,6 +1133,13 @@
   background: var(--panel-soft);
 }
 
+:global([data-theme='dark']) .reasoningOption:hover,
+:global([data-theme='dark']) .compactOption:hover,
+:global(:root[data-theme='dark']) .reasoningOption:hover,
+:global(:root[data-theme='dark']) .compactOption:hover {
+  background: var(--agent-chat-button-hover);
+}
+
 .compactEmpty {
   padding: 8px;
   color: var(--muted);
@@ -933,6 +1158,11 @@
     border-bottom: 1px solid var(--hairline);
     padding-right: 0;
     padding-bottom: 14px;
+  }
+
+  :global([data-theme='dark']) .historyPane,
+  :global(:root[data-theme='dark']) .historyPane {
+    border-bottom-color: var(--agent-chat-border);
   }
 
   .historyCollapsedShell {

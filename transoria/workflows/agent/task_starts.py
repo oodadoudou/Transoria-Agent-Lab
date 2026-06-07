@@ -310,6 +310,18 @@ def _resolve_stage_model_and_prompt(
 def _translation_glossary_from_payload(
     payload: Mapping[str, object], *, task_service: TaskService
 ) -> Glossary:
+    review_task_id = payload.get("glossary_review_task_id")
+    if isinstance(review_task_id, str) and review_task_id.strip():
+        final = task_service.read_glossary_review_final(task_id=review_task_id.strip())
+        rows = final.get("rows")
+        glossary = Glossary.from_records(rows if isinstance(rows, list) else [])
+        if not glossary.entries:
+            raise BridgeError.invalid_argument(
+                f"glossary review task {review_task_id!r} has no usable final table rows.",
+                field="glossary_review_task_id",
+                details={"task_id": review_task_id},
+            )
+        return glossary
     task_id = payload.get("glossary_task_id")
     if not isinstance(task_id, str) or not task_id.strip():
         return Glossary.empty()

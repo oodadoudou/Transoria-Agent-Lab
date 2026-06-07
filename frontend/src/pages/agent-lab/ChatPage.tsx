@@ -4,6 +4,7 @@ import type {
   AgentActionDraft,
   AgentInventory,
   AgentRecipe,
+  AgentTaskKind,
   AgentWorkspace,
   AgentWorkspaceResponse,
   PromptKind,
@@ -11,7 +12,12 @@ import type {
 } from "@/bridge/types";
 import { Pill } from "@/components/Pill";
 import { useMessages } from "@/locales";
+import { useModelProfilesStore } from "@/store/useModelProfilesStore";
 import { usePromptPresetsStore } from "@/store/usePromptPresetsStore";
+import {
+  useRuntimeStore,
+  type RunKind,
+} from "@/store/useRuntimeStore";
 import { useTaskStore } from "@/store/useTaskStore";
 import styles from "./ChatPage.module.css";
 
@@ -56,6 +62,7 @@ export function ChatPage() {
   const applyResponse = (response: AgentWorkspaceResponse) => {
     setWorkspace(response.workspace);
     setInventory(response.inventory);
+    syncRuntimeTasksFromResponse(response);
   };
 
   const run = async (action: () => Promise<AgentWorkspaceResponse>) => {
@@ -65,6 +72,7 @@ export function ChatPage() {
       const response = await action();
       applyResponse(response);
       await refreshPromptStoresFromResult(response);
+      await refreshModelProfilesFromResult(response);
     } catch (err) {
       setError(
         `${t.saveFailed} ${err instanceof Error ? err.message : ""}`.trim(),
@@ -870,6 +878,97 @@ function collectPromptKinds(value: unknown, kinds: Set<PromptKind>): void {
   Object.values(value).forEach((item) => collectPromptKinds(item, kinds));
 }
 
+async function refreshModelProfilesFromResult(
+  response: AgentWorkspaceResponse,
+): Promise<void> {
+  if (!resultIncludesModelProfileChange(response.result)) return;
+  await useModelProfilesStore.getState().refresh();
+}
+
+function resultIncludesModelProfileChange(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => resultIncludesModelProfileChange(item));
+  }
+  if (!isRecord(value)) return false;
+  if (
+    value.kind === "create_model_profile" ||
+    value.kind === "update_model_profile"
+  ) {
+    return true;
+  }
+  if (isRecord(value.profile) && typeof value.profile.id === "string") {
+    return true;
+  }
+  return Object.values(value).some((item) =>
+    resultIncludesModelProfileChange(item),
+  );
+}
+
+function syncRuntimeTasksFromResponse(response: AgentWorkspaceResponse): void {
+  const tasks = startedTasksFromResult(response.result);
+  const activeTask = response.workspace.active_task;
+  if (activeTask) {
+    tasks.push({
+      kind: activeTask.kind,
+      taskId: activeTask.task_id,
+    });
+  }
+  if (!tasks.length) return;
+
+  const runtime = useRuntimeStore.getState();
+  const seen = new Set<string>();
+  for (const task of tasks) {
+    const runKind = runKindFromAgentTaskKind(task.kind);
+    if (!runKind) continue;
+    const key = `${runKind}:${task.taskId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    runtime.setActiveTaskId(runKind, task.taskId);
+    void runtime.pollSnapshot(runKind);
+  }
+}
+
+function startedTasksFromResult(
+  result: Record<string, unknown> | undefined,
+): Array<{ kind: AgentTaskKind; taskId: string }> {
+  const tasks: Array<{ kind: AgentTaskKind; taskId: string }> = [];
+  collectStartedTasks(result, tasks);
+  return tasks;
+}
+
+function collectStartedTasks(
+  value: unknown,
+  tasks: Array<{ kind: AgentTaskKind; taskId: string }>,
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectStartedTasks(item, tasks));
+    return;
+  }
+  if (!isRecord(value)) return;
+
+  const task = value.task;
+  if (isRecord(task) && isAgentTaskKind(task.kind)) {
+    const taskId = task.task_id;
+    if (typeof taskId === "string" && taskId.trim()) {
+      tasks.push({ kind: task.kind, taskId });
+    }
+  }
+
+  Object.values(value).forEach((item) => collectStartedTasks(item, tasks));
+}
+
+function runKindFromAgentTaskKind(kind: AgentTaskKind): RunKind {
+  return kind;
+}
+
+function isAgentTaskKind(value: unknown): value is AgentTaskKind {
+  return (
+    value === "translation" ||
+    value === "glossary" ||
+    value === "glossary_review"
+  );
+}
+
 function isPromptKind(value: unknown): value is PromptKind {
   return (
     value === "translation" ||
@@ -1118,6 +1217,7 @@ function formatDraftField(key: string): string {
       target_language: "目标语言",
       novel_background: "小说背景",
       glossary_task_id: "术语任务 ID",
+      glossary_review_task_id: "术语审查任务 ID",
       concurrency_limit: "并发数",
       rpm_limit: "每分钟请求数",
       tpm_limit: "每分钟 Token 数",
