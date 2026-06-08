@@ -697,22 +697,26 @@ export function ChatPage() {
                   draftConfirmed ? styles.draftConfirmBoxReady : ""
                 }`}
               >
+                <input
+                  className={styles.draftConfirmInput}
+                  type="checkbox"
+                  checked={draftConfirmed}
+                  disabled={busy}
+                  onChange={(event) => setDraftConfirmed(event.target.checked)}
+                />
+                <span className={styles.draftConfirmVisual} aria-hidden="true" />
                 <div className={styles.draftConfirmCopy}>
                   <strong>{t.draftConfirmTitle}</strong>
                   <p>
                     {draftConfirmed
                       ? t.draftConfirmChecked
-                    : t.draftConfirmUnchecked}
+                      : t.draftConfirmUnchecked}
                   </p>
                 </div>
-                <span className={styles.draftConfirmControl}>
-                  <input
-                    type="checkbox"
-                    checked={draftConfirmed}
-                    disabled={busy}
-                    onChange={(event) => setDraftConfirmed(event.target.checked)}
-                  />
-                  <span>{t.draftConfirmLabel}</span>
+                <span className={styles.draftConfirmStatus}>
+                  {draftConfirmed
+                    ? t.draftConfirmReadyLabel
+                    : t.draftConfirmLabel}
                 </span>
               </label>
               <div className={styles.actions}>

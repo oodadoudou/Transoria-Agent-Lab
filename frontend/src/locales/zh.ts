@@ -615,7 +615,8 @@ export const zh: Messages = {
     saveFailed: "Agent 操作失败。",
     draftPayload: "草案内容",
     draftConfirmTitle: "执行确认",
-    draftConfirmLabel: "我已检查草案，授权执行",
+    draftConfirmLabel: "点击确认",
+    draftConfirmReadyLabel: "已授权执行",
     draftConfirmUnchecked:
       "应用前必须先确认。未确认、放弃或调整都不会写入配置，也不会启动任务。",
     draftConfirmChecked: "已确认。点击「应用」后会按草案内容执行。",

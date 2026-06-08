@@ -600,22 +600,6 @@ def _generate_reply(
     llm_client_factory: LlmClientFactory,
 ) -> tuple[str, AgentActionDraft | None]:
     workflow_model_id = state.workflow_model_id
-    if not workflow_model_id:
-        return (
-            "请选择一个工作模型。当前聊天已经可记录，但还不会调用模型生成配置草案。",
-            None,
-        )
-    profile = profile_store.get(workflow_model_id)
-    if profile is None:
-        return (
-            "当前选择的工作模型不存在。请在侧边栏重新选择一个模型配置。",
-            None,
-        )
-    if not profile.api_keys:
-        return (
-            "当前工作模型没有可用 API key。请先在模型页补全 key，或切换到已配置的模型。",
-            None,
-        )
     conversation_context = _recent_conversation_context(state)
     if not user_message.startswith("The user clicked Adjust on the current pending draft."):
         status_state = _task_status_context(task_service)
@@ -633,12 +617,88 @@ def _generate_reply(
             )
             if direct is not None:
                 return direct
-    inventory = _inventory(profile_store, cache_root)
     current_state = _llm_context(
         state,
         settings_store=settings_store,
         task_service=task_service,
     )
+    if not workflow_model_id:
+        direct = None
+        if not user_message.startswith("The user clicked Adjust on the current pending draft."):
+            direct = _direct_compound_config_response(
+                user_message=user_message,
+                current_state=current_state,
+                profile_store=profile_store,
+                cache_root=cache_root,
+            )
+            if direct is None:
+                direct = _direct_prompt_quality_response(
+                    user_message=user_message,
+                    state=state,
+                    cache_root=cache_root,
+                )
+            if direct is None:
+                direct = _direct_prompt_preset_response(user_message=user_message)
+            if direct is None:
+                direct = _direct_vague_model_profile_guidance_response(
+                    user_message=user_message,
+                    profile_store=profile_store,
+                )
+            if direct is None:
+                direct = _direct_model_profile_copy_response(
+                    user_message=user_message,
+                    conversation_context=conversation_context,
+                    profile_store=profile_store,
+                )
+            if direct is None:
+                direct = _direct_model_upgrade_response(
+                    user_message=user_message,
+                    state=state,
+                    profile_store=profile_store,
+                )
+        if direct is not None:
+            reply, draft = direct
+            if draft is not None:
+                try:
+                    _validate_draft(
+                        draft,
+                        state=state,
+                        profile_store=profile_store,
+                        cache_root=cache_root,
+                        task_service=task_service,
+                    )
+                except BridgeError as exc:
+                    return (f"{reply}\n\n（已忽略无法应用的草案：{exc}）".strip(), None)
+                reply = _append_model_quality_warnings(
+                    reply,
+                    draft=draft,
+                    state=state,
+                    profile_store=profile_store,
+                )
+            return reply, draft
+        if _looks_like_translation_task_request(user_message) or _looks_like_glossary_review_request(
+            user_message
+        ) or _looks_like_glossary_extraction_request(user_message):
+            return (
+                "请先选择一个工作模型。启动术语、术语审查或翻译任务时，Agent 需要用工作模型补齐缺失的阶段配置并生成确认草案。",
+                None,
+            )
+        return (
+            "请选择一个工作模型。当前聊天已经可记录；模型/Prompt 等明确配置请求仍可生成确认草案，但需要工作模型才能处理更开放的任务规划。",
+            None,
+        )
+    profile = profile_store.get(workflow_model_id)
+    if profile is None:
+        return (
+            "当前选择的工作模型不存在。请在侧边栏重新选择一个模型配置。",
+            None,
+        )
+    if not profile.api_keys:
+        return (
+            "当前工作模型没有可用 API key。请先在模型页补全 key，或切换到已配置的模型。",
+            None,
+        )
+    inventory = _inventory(profile_store, cache_root)
     direct = None
     if not user_message.startswith("The user clicked Adjust on the current pending draft."):
         direct = _direct_translation_response(
@@ -1120,8 +1180,8 @@ def _direct_prompt_quality_response(
         return (
             (
                 "我可以帮你优化 Prompt，但还缺少可操作的问题描述。"
-                "请贴一小段原文/译文，或说明具体问题类型，例如源文残留、"
-                "人名不一致、术语漂移、文风太直译、漏翻或翻译腔。"
+                "请贴一小段原文/译文，或说明具体问题类型，例如人名、术语、漏翻、源文残留、"
+                "文风太直译或翻译腔。"
             ),
             None,
         )
@@ -1261,9 +1321,48 @@ def _prompt_kind_label(kind: PromptKind) -> str:
 
 def _looks_like_prompt_quality_request(text: str) -> bool:
     normalized = text.lower()
-    if "prompt" not in normalized and "提示词" not in text:
+    mentions_prompt = "prompt" in normalized or "提示词" in text
+    mentions_translation_quality = "翻译" in text and any(
+        marker in text
+        for marker in (
+            "效果不好",
+            "质量不好",
+            "不好",
+            "问题",
+            "翻译腔",
+            "不自然",
+            "源文残留",
+            "原文残留",
+            "漏翻",
+            "错译",
+            "直译",
+            "文风",
+            "人名",
+            "术语",
+            "一致",
+            "低置信",
+            "质量",
+            "很怪",
+            "怪",
+        )
+    )
+    if not mentions_prompt and not mentions_translation_quality:
         return False
-    if not any(marker in text for marker in ("改", "修改", "优化", "调整", "重写", "重新设计")):
+    if not any(
+        marker in text
+        for marker in (
+            "改",
+            "修改",
+            "优化",
+            "调整",
+            "重写",
+            "重新设计",
+            "看看",
+            "看一下",
+            "帮我看",
+            "诊断",
+        )
+    ):
         return False
     return any(
         marker in text
@@ -1285,6 +1384,8 @@ def _looks_like_prompt_quality_request(text: str) -> bool:
             "一致",
             "低置信",
             "质量",
+            "很怪",
+            "怪",
         )
     )
 
@@ -1500,7 +1601,7 @@ def _direct_vague_model_profile_guidance_response(
         (
             "我可以帮你配置模型，但不能替你猜 provider model_id、base_url 或 API key。"
             "如果你不知道具体信息，请选择一种方式：\n"
-            "1. 说“按照某个已有模型复制一个”，并告诉我要改成的 provider model_id；\n"
+            "1. 说“按照某个已有模型复制一个”，并告诉我要改成的准确 provider model_id；\n"
             "2. 直接提供接口类型、base_url、provider model_id 和 API key，我会生成确认草案；\n"
             "3. 如果只是想提高质量，可以让我先查看现有模型，切换到已经配置好的更强模型。\n\n"
             "任何写入都会先生成草案，API key 在预览里会遮罩。"
@@ -2763,7 +2864,7 @@ def _looks_like_glossary_extraction_request(text: str) -> bool:
         flags=re.IGNORECASE,
     ):
         return False
-    return any(
+    if any(
         marker in normalized
         for marker in (
             "提取术语",
@@ -2803,7 +2904,95 @@ def _looks_like_glossary_extraction_request(text: str) -> bool:
             "extract terms",
             "term extraction",
         )
+    ):
+        return True
+    return _looks_like_dumb_initial_workflow_request(text)
+
+
+def _looks_like_dumb_initial_workflow_request(text: str) -> bool:
+    normalized = text.lower()
+    if any(
+        marker in normalized
+        for marker in (
+            "开始翻译",
+            "启动翻译",
+            "执行翻译",
+            "进行翻译",
+            "翻译任务",
+            "翻译小说",
+            "run translation",
+            "start translation",
+            "translate novel",
+            "translate book",
+        )
+    ):
+        return False
+    if any(marker in normalized for marker in ("prompt", "提示词", "预设")):
+        return False
+    if "模型配置" in normalized or "model profile" in normalized:
+        return False
+    has_path = bool(_extract_absolute_path_candidates(text)) or bool(
+        re.search(
+            r"input|output|输入|输出|目录|路径|文件夹|epub|\.epub|txt|\.txt",
+            text,
+            flags=re.IGNORECASE,
+        )
     )
+    has_novel_context = any(
+        marker in text
+        for marker in (
+            "背景",
+            "类型",
+            "世界观",
+            "作品关键词",
+            "人物介绍",
+            "作品指南",
+            "小说介绍",
+        )
+    )
+    if not (has_path or has_novel_context):
+        return False
+    has_process_intent = any(
+        marker in normalized
+        for marker in (
+            "处理",
+            "跑一下",
+            "跑流程",
+            "跑这个",
+            "跑一遍",
+            "弄一下",
+            "搞一下",
+            "帮我弄",
+            "帮我搞",
+            "帮我跑",
+            "帮我处理",
+            "开始处理",
+            "一键",
+            "傻瓜",
+            "自动走",
+            "自动跑",
+            "workflow",
+            "流程",
+        )
+    )
+    has_novel_target = any(
+        marker in normalized
+        for marker in (
+            "小说",
+            "这本",
+            "这个目录",
+            "该目录",
+            "这个文件夹",
+            "这套文件",
+            "这些文件",
+            "这份",
+            "epub",
+            ".epub",
+            "txt",
+            ".txt",
+        )
+    )
+    return has_process_intent and has_novel_target
 
 
 def _looks_like_glossary_extraction_continuation(text: str) -> bool:
@@ -3241,21 +3430,7 @@ def _looks_like_vague_model_profile_request(text: str) -> bool:
             "不确定",
         )
     )
-    has_concrete_connection = any(
-        marker in normalized
-        for marker in (
-            "base_url",
-            "api key",
-            "apikey",
-            "密钥",
-            "provider model_id",
-            "model_id",
-            "模型 id",
-            "模型id",
-            "接口地址",
-        )
-    )
-    return has_model and has_create_or_config and has_uncertainty and not has_concrete_connection
+    return has_model and has_create_or_config and has_uncertainty
 
 
 def _looks_like_model_upgrade_request(text: str) -> bool:
@@ -3267,6 +3442,50 @@ def _looks_like_model_upgrade_request(text: str) -> bool:
         or _looks_like_glossary_review_request(text)
         or _looks_like_direct_prompt_preset_request(text)
     ):
+        return False
+    has_create_or_config = any(
+        marker in normalized
+        for marker in (
+            "新增",
+            "添加",
+            "加一个",
+            "新建",
+            "创建",
+            "配置",
+            "接入",
+            "add",
+            "create",
+            "configure",
+        )
+    )
+    has_uncertainty = any(
+        marker in normalized
+        for marker in (
+            "不知道",
+            "不清楚",
+            "不会",
+            "不懂",
+            "不了解",
+            "随便",
+            "你帮我",
+            "帮我配",
+            "帮我配置",
+            "不确定",
+        )
+    )
+    has_existing_inventory_intent = any(
+        marker in normalized
+        for marker in (
+            "现有配置",
+            "已有配置",
+            "当前配置",
+            "模型库",
+            "已经配置",
+            "已配置",
+            "inventory",
+        )
+    )
+    if has_create_or_config and has_uncertainty and not has_existing_inventory_intent:
         return False
     has_model = any(marker in normalized for marker in ("模型", "model", "profile"))
     has_quality_intent = any(

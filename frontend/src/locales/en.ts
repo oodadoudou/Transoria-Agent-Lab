@@ -634,7 +634,8 @@ export const en: Messages = {
     saveFailed: "Agent action failed.",
     draftPayload: "Draft payload",
     draftConfirmTitle: "Execution confirmation",
-    draftConfirmLabel: "I reviewed the draft and authorize execution",
+    draftConfirmLabel: "Click to confirm",
+    draftConfirmReadyLabel: "Authorized",
     draftConfirmUnchecked:
       "Confirm before applying. Without confirmation, discard or adjust will not save config or start tasks.",
     draftConfirmChecked: "Confirmed. Apply will execute the draft as shown.",

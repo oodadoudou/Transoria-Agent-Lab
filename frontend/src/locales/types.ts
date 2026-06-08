@@ -377,6 +377,7 @@ export interface Messages {
     draftPayload: string;
     draftConfirmTitle: string;
     draftConfirmLabel: string;
+    draftConfirmReadyLabel: string;
     draftConfirmUnchecked: string;
     draftConfirmChecked: string;
     confirmationBoundary: string;

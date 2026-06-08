@@ -16,6 +16,7 @@ Config via env (defaults target the local test endpoint):
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import urllib.error
@@ -38,17 +39,12 @@ API_KEY = os.environ.get("AGENT_E2E_API_KEY", "pwd")
 MODEL = os.environ.get("AGENT_E2E_MODEL", "gemini-3-flash-agent")
 
 
-def _endpoint_reachable() -> bool:
-    payload = json.dumps(
-        {
-            "model": MODEL,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-        }
-    ).encode("utf-8")
+def _probe(path: str, *, method: str = "GET", body: bytes | None = None) -> int | None:
+    """Return the HTTP status for a probe call, or None if unreachable."""
     request = urllib.request.Request(
-        f"{BASE_URL}/chat/completions",
-        data=payload,
+        f"{BASE_URL}{path}",
+        data=body,
+        method=method,
         headers={
             "Authorization": f"Bearer {API_KEY}",
             "Content-Type": "application/json",
@@ -56,9 +52,33 @@ def _endpoint_reachable() -> bool:
     )
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
-            return response.status == 200
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
     except (urllib.error.URLError, OSError):
-        return False
+        return None
+
+
+@functools.cache
+def _endpoint_reachable() -> bool:
+    """Liveness check, computed once per session (``@cache``).
+
+    Prefers a lightweight ``GET /models`` call so the opt-in suite adds almost
+    no load on the local model; falls back to a tiny chat completion only when
+    the list endpoint is unavailable. Caching means the whole run makes at most
+    one liveness call instead of one per test, so a momentarily slow server no
+    longer skips a subset of tests mid-run.
+    """
+    if _probe("/models") == 200:
+        return True
+    chat = json.dumps(
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }
+    ).encode("utf-8")
+    return _probe("/chat/completions", method="POST", body=chat) == 200
 
 
 @pytest.fixture
