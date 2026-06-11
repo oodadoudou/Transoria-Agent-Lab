@@ -1,23 +1,23 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   AgentRecipe,
   AgentTaskKind,
   AgentWorkspace,
   ThinkingLevel,
 } from "@/bridge/types";
-import { Pill } from "@/components/Pill";
 import { useMessages } from "@/locales";
 import { useRuntimeStore, usePollRunSnapshot } from "@/store/useRuntimeStore";
 import { useTaskStore } from "@/store/useTaskStore";
+import { ActiveTaskBar } from "./components/ActiveTaskBar";
 import { ChatComposer } from "./components/ChatComposer";
 import { ChatMessageList } from "./components/ChatMessageList";
-import {
-  DraftConfirmationChecklist,
-  DraftPreview,
-} from "./components/DraftPreview";
+import { DraftSection } from "./components/DraftSection";
 import { HistoryPane } from "./components/HistoryPane";
 import styles from "./ChatPage.module.css";
 import { useAgentWorkspace } from "./useAgentWorkspace";
+import { useChatMessageActions } from "./useChatMessageActions";
+import { useDraftControls } from "./useDraftControls";
+import { useHistoryPaneState } from "./useHistoryPaneState";
 
 export function ChatPage() {
   const messages = useMessages();
@@ -28,27 +28,9 @@ export function ChatPage() {
   const glossaryReviewHeader = useRuntimeStore(
     (state) => state.glossary_review.header,
   );
-  const [input, setInput] = useState("");
-  const [editingConvId, setEditingConvId] = useState<string | null>(null);
-  const [editingConvTitle, setEditingConvTitle] = useState("");
-  const [newMemory, setNewMemory] = useState("");
-  const [editingMemoryIndex, setEditingMemoryIndex] = useState<number | null>(
-    null,
-  );
-  const [editingMemoryText, setEditingMemoryText] = useState("");
-  const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [recipeOpen, setRecipeOpen] = useState(false);
   const [reasoningOpen, setReasoningOpen] = useState(false);
-  const [processExpanded, setProcessExpanded] = useState(false);
-  const [adjustingDraft, setAdjustingDraft] = useState(false);
-  const [draftAdjustment, setDraftAdjustment] = useState("");
-  const [draftConfirmed, setDraftConfirmed] = useState(false);
-  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const messagesRef = useRef<HTMLDivElement | null>(null);
-  const [expandedMessages, setExpandedMessages] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
   usePollRunSnapshot("translation");
   usePollRunSnapshot("glossary");
   usePollRunSnapshot("glossary_review");
@@ -74,6 +56,70 @@ export function ChatPage() {
     loadFailedText: t.loadFailed,
     saveFailedText: t.saveFailed,
   });
+  const {
+    input,
+    setInput,
+    copiedMessageId,
+    expandedMessages,
+    messagesRef,
+    processExpanded,
+    sendMessage,
+    resendMessage,
+    copyMessage,
+    toggleMessageExpanded,
+    toggleProcessExpanded,
+  } = useChatMessageActions({
+    sendWorkspaceMessage,
+    setError,
+  });
+  const {
+    adjustingDraft,
+    draftAdjustment,
+    draftConfirmed,
+    setDraftAdjustment,
+    setDraftConfirmed,
+    applyDraft,
+    discardDraft,
+    startAdjustDraft,
+    cancelDraftAdjustment,
+    submitDraftAdjustment,
+  } = useDraftControls({
+    workspace,
+    applyWorkspaceDraft,
+    discardWorkspaceDraft,
+    reviseDraft,
+  });
+  const {
+    editingConvId,
+    editingConvTitle,
+    newMemory,
+    editingMemoryIndex,
+    editingMemoryText,
+    historyCollapsed,
+    setEditingConvTitle,
+    setNewMemory,
+    setEditingMemoryText,
+    toggleHistoryCollapsed,
+    createConversation,
+    switchConversation,
+    deleteConversation,
+    startRename,
+    commitRename,
+    cancelRename,
+    addMemory,
+    deleteMemory,
+    startEditMemory,
+    commitMemoryEdit,
+    cancelMemoryEdit,
+  } = useHistoryPaneState({
+    workspace,
+    createWorkspaceConversation,
+    switchWorkspaceConversation,
+    renameConversation,
+    deleteWorkspaceConversation,
+    updateMemory,
+    deleteWorkspaceMemory,
+  });
 
   useEffect(() => {
     const container = messagesRef.current;
@@ -83,133 +129,6 @@ export function ChatPage() {
       behavior: "smooth",
     });
   }, [busy, workspace?.messages.length, workspace?.pending_draft?.id]);
-
-  useEffect(() => {
-    setDraftConfirmed(false);
-  }, [workspace?.pending_draft?.id]);
-
-  const sendText = async (rawText: string, restoreOnError = false) => {
-    const text = rawText.trim();
-    if (!text) return;
-    if (restoreOnError) {
-      setInput("");
-    }
-    const ok = await sendWorkspaceMessage(text);
-    if (!ok && restoreOnError) {
-      setInput(text);
-    }
-  };
-
-  const sendMessage = async () => {
-    await sendText(input, true);
-  };
-
-  const resendMessage = (content: string) => {
-    void sendText(content);
-  };
-
-  const copyMessage = async (id: string, content: string) => {
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(content);
-      } else {
-        fallbackCopy(content);
-      }
-      setCopiedMessageId(id);
-      window.setTimeout(() => {
-        setCopiedMessageId((current) => (current === id ? null : current));
-      }, 1400);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const applyDraft = () => {
-    if (!workspace?.pending_draft || !draftConfirmed) return;
-    const draftId = workspace.pending_draft.id;
-    setAdjustingDraft(false);
-    setDraftAdjustment("");
-    setDraftConfirmed(false);
-    void applyWorkspaceDraft(draftId);
-  };
-
-  const discardDraft = () => {
-    if (!workspace?.pending_draft) return;
-    const draftId = workspace.pending_draft.id;
-    setAdjustingDraft(false);
-    setDraftAdjustment("");
-    void discardWorkspaceDraft(draftId);
-  };
-
-  const startAdjustDraft = () => {
-    if (!workspace?.pending_draft) return;
-    setAdjustingDraft(true);
-    setDraftAdjustment("");
-  };
-
-  const cancelDraftAdjustment = () => {
-    setAdjustingDraft(false);
-    setDraftAdjustment("");
-  };
-
-  const submitDraftAdjustment = async () => {
-    const adjustment = draftAdjustment.trim();
-    if (!workspace?.pending_draft || !adjustment) return;
-    const draftId = workspace.pending_draft.id;
-    setAdjustingDraft(false);
-    setDraftAdjustment("");
-    await reviseDraft(draftId, adjustment);
-  };
-
-  const createConversation = () => createWorkspaceConversation();
-
-  const switchConversation = (id: string) => {
-    if (id === workspace?.active_conversation_id) return;
-    void switchWorkspaceConversation(id);
-  };
-
-  const deleteConversation = (id: string) =>
-    void deleteWorkspaceConversation(id);
-
-  const startRename = (id: string, title: string) => {
-    setEditingConvId(id);
-    setEditingConvTitle(title);
-  };
-
-  const commitRename = async () => {
-    const id = editingConvId;
-    const title = editingConvTitle.trim();
-    setEditingConvId(null);
-    if (!id || !title) return;
-    await renameConversation(id, title);
-  };
-
-  const addMemory = async () => {
-    const text = newMemory.trim();
-    if (!text) return;
-    setNewMemory("");
-    await updateMemory([...(workspace?.memories ?? []), text]);
-  };
-
-  const deleteMemory = (memory: string) =>
-    void deleteWorkspaceMemory(memory);
-
-  const startEditMemory = (index: number, memory: string) => {
-    setEditingMemoryIndex(index);
-    setEditingMemoryText(memory);
-  };
-
-  const commitMemoryEdit = async () => {
-    const index = editingMemoryIndex;
-    const text = editingMemoryText.trim();
-    setEditingMemoryIndex(null);
-    if (index === null) return;
-    const current = workspace?.memories ?? [];
-    const next = text
-      ? current.map((memory, i) => (i === index ? text : memory))
-      : current.filter((_, i) => i !== index);
-    await updateMemory(next);
-  };
 
   const switchRecipe = (id: string) => {
     if (!id) return;
@@ -237,18 +156,6 @@ export function ChatPage() {
       return;
     }
     navigate({ module: "glossary-review", page: "run" });
-  };
-
-  const toggleMessageExpanded = (id: string) => {
-    setExpandedMessages((current) => {
-      const next = new Set(current);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
   };
 
   const activeRecipe = pickActiveRecipe(workspace);
@@ -297,14 +204,12 @@ export function ChatPage() {
           newMemory={newMemory}
           editingMemoryIndex={editingMemoryIndex}
           editingMemoryText={editingMemoryText}
-          onToggleCollapsed={() =>
-            setHistoryCollapsed((collapsed) => !collapsed)
-          }
+          onToggleCollapsed={toggleHistoryCollapsed}
           onCreateConversation={() => void createConversation()}
           onSwitchConversation={switchConversation}
           onStartRename={startRename}
           onCommitRename={commitRename}
-          onCancelRename={() => setEditingConvId(null)}
+          onCancelRename={cancelRename}
           onEditingConversationTitleChange={setEditingConvTitle}
           onDeleteConversation={deleteConversation}
           onNewMemoryChange={setNewMemory}
@@ -312,7 +217,7 @@ export function ChatPage() {
           onStartEditMemory={startEditMemory}
           onEditingMemoryTextChange={setEditingMemoryText}
           onCommitMemoryEdit={commitMemoryEdit}
-          onCancelMemoryEdit={() => setEditingMemoryIndex(null)}
+          onCancelMemoryEdit={cancelMemoryEdit}
           onDeleteMemory={deleteMemory}
         />
 
@@ -332,32 +237,13 @@ export function ChatPage() {
           </div>
 
           {activeTask ? (
-            <div className={styles.activeTaskBar}>
-              <div className={styles.activeTaskMain}>
-                <span className={styles.activeTaskBadge}>
-                  {t.activeTaskTitle}
-                </span>
-                <div>
-                  <strong>{t.activeTaskKind[activeTask.kind]}</strong>
-                  <p>
-                    {t.activeTaskStatus}:{" "}
-                    {formatTaskStatus(matchedActiveTaskHeader?.status, messages)}
-                    <span aria-hidden="true"> · </span>
-                    ID {activeTask.task_id}
-                    <span aria-hidden="true"> · </span>
-                    {t.activeTaskStartedAt}{" "}
-                    {formatDateTime(activeTask.started_at)}
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                className={styles.activeTaskButton}
-                onClick={() => openActiveTaskDashboard(activeTask.kind)}
-              >
-                {t.activeTaskOpenDashboard}
-              </button>
-            </div>
+            <ActiveTaskBar
+              activeTask={activeTask}
+              taskStatus={matchedActiveTaskHeader?.status}
+              t={t}
+              messages={messages}
+              onOpenDashboard={() => openActiveTaskDashboard(activeTask.kind)}
+            />
           ) : null}
 
           <ChatMessageList
@@ -372,99 +258,25 @@ export function ChatPage() {
             onQuickAction={setInput}
             onResendMessage={resendMessage}
             onToggleMessageExpanded={toggleMessageExpanded}
-            onToggleProcessExpanded={() =>
-              setProcessExpanded((expanded) => !expanded)
-            }
+            onToggleProcessExpanded={toggleProcessExpanded}
           />
 
           {workspace?.pending_draft ? (
-            <div className={styles.draft}>
-              <div>
-                <h3>{workspace.pending_draft.title}</h3>
-                <p>{workspace.pending_draft.summary}</p>
-              </div>
-              <DraftConfirmationChecklist draft={workspace.pending_draft} />
-              <div className={styles.payloadLabel}>{t.draftPayload}</div>
-              <DraftPreview draft={workspace.pending_draft} />
-              <label
-                className={`${styles.draftConfirmBox} ${
-                  draftConfirmed ? styles.draftConfirmBoxReady : ""
-                }`}
-              >
-                <input
-                  className={styles.draftConfirmInput}
-                  type="checkbox"
-                  checked={draftConfirmed}
-                  disabled={busy}
-                  onChange={(event) => setDraftConfirmed(event.target.checked)}
-                />
-                <span className={styles.draftConfirmVisual} aria-hidden="true" />
-                <div className={styles.draftConfirmCopy}>
-                  <strong>{t.draftConfirmTitle}</strong>
-                  <p>
-                    {draftConfirmed
-                      ? t.draftConfirmChecked
-                      : t.draftConfirmUnchecked}
-                  </p>
-                </div>
-                <span className={styles.draftConfirmStatus}>
-                  {draftConfirmed
-                    ? t.draftConfirmReadyLabel
-                    : t.draftConfirmLabel}
-                </span>
-              </label>
-              <div className={styles.actions}>
-                <Pill disabled={busy || !draftConfirmed} onClick={applyDraft}>
-                  {t.applyDraft}
-                </Pill>
-                <Pill variant="ghost" disabled={busy} onClick={discardDraft}>
-                  {t.discardDraft}
-                </Pill>
-                <Pill variant="ghost" disabled={busy} onClick={startAdjustDraft}>
-                  {t.adjustDraft}
-                </Pill>
-              </div>
-              {adjustingDraft ? (
-                <div className={styles.adjustBox}>
-                  <label htmlFor="agent-draft-adjustment">
-                    {t.adjustDraftTitle}
-                  </label>
-                  <textarea
-                    id="agent-draft-adjustment"
-                    value={draftAdjustment}
-                    autoFocus
-                    placeholder={t.adjustDraftPlaceholder}
-                    disabled={busy}
-                    onChange={(event) =>
-                      setDraftAdjustment(event.target.value)
-                    }
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter") return;
-                      if (event.shiftKey || event.nativeEvent.isComposing) {
-                        return;
-                      }
-                      event.preventDefault();
-                      void submitDraftAdjustment();
-                    }}
-                  />
-                  <div className={styles.adjustActions}>
-                    <Pill
-                      disabled={busy || !draftAdjustment.trim()}
-                      onClick={() => void submitDraftAdjustment()}
-                    >
-                      {t.submitAdjustment}
-                    </Pill>
-                    <Pill
-                      variant="ghost"
-                      disabled={busy}
-                      onClick={cancelDraftAdjustment}
-                    >
-                      {t.cancelAdjustment}
-                    </Pill>
-                  </div>
-                </div>
-              ) : null}
-            </div>
+            <DraftSection
+              draft={workspace.pending_draft}
+              busy={busy}
+              t={t}
+              adjustingDraft={adjustingDraft}
+              draftAdjustment={draftAdjustment}
+              draftConfirmed={draftConfirmed}
+              onDraftAdjustmentChange={setDraftAdjustment}
+              onDraftConfirmedChange={setDraftConfirmed}
+              onApplyDraft={applyDraft}
+              onDiscardDraft={discardDraft}
+              onStartAdjustDraft={startAdjustDraft}
+              onCancelDraftAdjustment={cancelDraftAdjustment}
+              onSubmitDraftAdjustment={submitDraftAdjustment}
+            />
           ) : null}
 
           <ChatComposer
@@ -495,50 +307,6 @@ export function ChatPage() {
       </div>
     </div>
   );
-}
-
-function fallbackCopy(text: string): void {
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.select();
-  try {
-    document.execCommand("copy");
-  } finally {
-    document.body.removeChild(textarea);
-  }
-}
-
-function formatDateTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
-}
-
-function formatTaskStatus(
-  status: string | undefined,
-  messages: ReturnType<typeof useMessages>,
-): string {
-  switch (status) {
-    case "running":
-      return messages.status.running;
-    case "stopping":
-    case "pausing":
-      return messages.status.stopping;
-    case "failed":
-      return messages.status.failed;
-    case "completed":
-      return messages.status.completed;
-    case "stopped":
-    case "paused":
-      return messages.status.stopped;
-    case "pending":
-    default:
-      return messages.status.running;
-  }
 }
 
 function pickActiveRecipe(workspace: AgentWorkspace | null): AgentRecipe | null {
