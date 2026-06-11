@@ -4028,6 +4028,158 @@ def test_agent_compound_draft_accepts_action_aliases(
     assert applied["result"]["results"][0]["kind"] == "update_model_profile"
 
 
+def test_agent_compound_draft_accepts_top_level_action_map(
+    tmp_path: Path,
+) -> None:
+    custom_prompt = _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.TRANSLATION,
+        preset_id="translation-custom-default",
+        name="默认",
+    )
+    router, _ = _router_with_workflow(
+        tmp_path,
+        f"""
+        {{
+          "reply": "I prepared one proposal with both changes.",
+          "draft": {{
+            "kind": "compound_config_update",
+            "title": "Update model and prompt",
+            "summary": "Updates model concurrency and renames the prompt.",
+            "payload": {{
+              "update_model_profile": {{
+                "profile_id": "profile-workflow",
+                "patch": {{
+                  "concurrency_limit": 4
+                }}
+              }},
+              "update_prompt_preset": {{
+                "id": "{custom_prompt.id}",
+                "patch": {{
+                  "name": "标准中文翻译预设"
+                }}
+              }}
+            }}
+          }}
+        }}
+        """,
+    )
+
+    draft = router.call(
+        "agent.send_message",
+        {"message": "请处理这次配置请求。"},
+    )["workspace"]["pending_draft"]
+
+    assert draft["kind"] == "compound_config_update"
+    assert [action["kind"] for action in draft["payload"]["actions"]] == [
+        "update_prompt_preset",
+        "update_model_profile",
+    ]
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    stored = ModelProfileStore.from_cache_root(tmp_path).get("profile-workflow")
+    assert stored is not None
+    assert stored.concurrency_limit == 4
+    prompts = PromptPresetStore(
+        path=tmp_path / "prompts.translation.json",
+        kind=PromptKind.TRANSLATION,
+    ).load()
+    renamed = next(preset for preset in prompts if preset.id == custom_prompt.id)
+    assert renamed.name == "标准中文翻译预设"
+    assert [item["kind"] for item in applied["result"]["results"]] == [
+        "update_prompt_preset",
+        "update_model_profile",
+    ]
+
+
+def test_agent_compound_draft_accepts_steps_alias_and_grouped_action_map(
+    tmp_path: Path,
+) -> None:
+    custom_prompt = _seed_custom_prompt(
+        tmp_path,
+        kind=PromptKind.TRANSLATION,
+        preset_id="translation-custom-default",
+        name="默认",
+    )
+    router, _ = _router_with_workflow(
+        tmp_path,
+        f"""
+        {{
+          "reply": "I prepared one grouped proposal.",
+          "draft": {{
+            "kind": "compound_config_update",
+            "title": "Batch config update",
+            "summary": "Updates model limits, prompt name, and saves a recipe.",
+            "payload": {{
+              "steps": {{
+                "update_model_profile": [
+                  {{
+                    "profile_id": "profile-workflow",
+                    "patch": {{
+                      "concurrency_limit": 4
+                    }}
+                  }},
+                  {{
+                    "profile_id": "profile-workflow",
+                    "patch": {{
+                      "rpm_limit": 90
+                    }}
+                  }}
+                ],
+                "update_prompt_preset": {{
+                  "id": "{custom_prompt.id}",
+                  "patch": {{
+                    "name": "标准中文翻译预设"
+                  }}
+                }},
+                "create_recipe": {{
+                  "name": "测试复合配置",
+                  "stage_model_ids": {{
+                    "translation": "profile-workflow"
+                  }},
+                  "stage_prompt_ids": {{
+                    "translation": "{custom_prompt.id}"
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+        """,
+    )
+
+    draft = router.call(
+        "agent.send_message",
+        {"message": "请处理这次批量配置请求。"},
+    )["workspace"]["pending_draft"]
+
+    assert draft["kind"] == "compound_config_update"
+    assert [action["kind"] for action in draft["payload"]["actions"]] == [
+        "update_prompt_preset",
+        "create_recipe",
+        "update_model_profile",
+        "update_model_profile",
+    ]
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+
+    stored = ModelProfileStore.from_cache_root(tmp_path).get("profile-workflow")
+    assert stored is not None
+    assert stored.concurrency_limit == 4
+    assert stored.rpm_limit == 90
+    prompts = PromptPresetStore(
+        path=tmp_path / "prompts.translation.json",
+        kind=PromptKind.TRANSLATION,
+    ).load()
+    renamed = next(preset for preset in prompts if preset.id == custom_prompt.id)
+    assert renamed.name == "标准中文翻译预设"
+    assert any(
+        recipe["name"] == "测试复合配置"
+        for recipe in applied["workspace"]["recipes"]
+    )
+
+
 def test_agent_directly_drafts_common_compound_config_request(
     tmp_path: Path,
 ) -> None:
@@ -4623,6 +4775,74 @@ def test_agent_task_start_requires_workflow_model_before_default_filling(
     content = response["workspace"]["messages"][-1]["content"]
     assert "请先选择一个工作模型" in content
     assert "启动术语、术语审查或翻译任务" in content
+
+
+def test_agent_task_intent_wins_over_model_copy_without_workflow_model(
+    tmp_path: Path,
+) -> None:
+    _seed_deepseek_profile(tmp_path)
+    source_dir = tmp_path / "C-pale-dawn copy"
+    source_dir.mkdir()
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "先按 DeepSeek flash 的模型配置跑完整 workflow，"
+                f"输入目录：{source_dir}，输出和输入放在同一个文件夹里。"
+                "BL 作品指南。背景/类型：现代。作品关键词：严肃、爱恨交织、禁忌关系。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    assert response["workspace"]["pending_draft"] is None
+    content = response["workspace"]["messages"][-1]["content"]
+    assert "请先选择一个工作模型" in content
+    assert "启动术语、术语审查或翻译任务" in content
+
+
+def test_agent_task_intent_wins_over_model_copy_with_workflow_model(
+    tmp_path: Path,
+) -> None:
+    _seed_profile(tmp_path)
+    _seed_deepseek_profile(tmp_path)
+    source_dir = tmp_path / "C-pale-dawn copy"
+    source_dir.mkdir()
+    (source_dir / "book.txt").write_text("source text", encoding="utf-8")
+    fake = RaisingAgentClient(AssertionError("LLM should not be called"))
+    router = build_default_router(cache_root=tmp_path, llm_client_factory=lambda: fake)
+    router.call(
+        "agent.update_workspace",
+        {"patch": {"workflow_model_id": "profile-workflow"}},
+    )
+
+    response = router.call(
+        "agent.send_message",
+        {
+            "message": (
+                "先按 DeepSeek flash 的模型配置跑完整 workflow，"
+                f"输入目录：{source_dir}，输出和输入放在同一个文件夹里。"
+                "BL 作品指南。背景/类型：现代。作品关键词：严肃、爱恨交织、禁忌关系。"
+            )
+        },
+    )
+
+    assert fake.requests == []
+    draft = response["workspace"]["pending_draft"]
+    assert draft["kind"] == "compound_config_update"
+    actions = draft["payload"]["actions"]
+    assert actions[0]["kind"] == "update_workspace"
+    assert actions[0]["payload"]["stage_model_ids"] == {
+        "term_extract": "deepseek-f"
+    }
+    assert actions[1]["kind"] == "start_glossary_task"
+    assert actions[1]["payload"]["input_dir"].rstrip("/") == str(source_dir)
+    assert actions[1]["payload"]["output_dir"].rstrip("/") == str(source_dir)
+    assert all(action["kind"] != "create_model_profile" for action in actions)
+    assert "组合草案" in response["workspace"]["messages"][-1]["content"]
 
 
 def test_agent_compound_can_create_model_then_select_it(

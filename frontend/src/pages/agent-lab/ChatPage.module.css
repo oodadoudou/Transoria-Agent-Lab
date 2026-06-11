@@ -1,11 +1,11 @@
 .page {
-  --agent-chat-main: #ffffff;
-  --agent-chat-stream: #ffffff;
-  --agent-chat-user: #f8f6ef;
-  --agent-chat-assistant: #f3f2ec;
-  --agent-chat-control: #f7f6f1;
-  --agent-chat-popup: #ffffff;
-  --agent-chat-disabled: rgb(15 15 18 / 42%);
+  --agent-chat-main: var(--panel);
+  --agent-chat-stream: var(--panel);
+  --agent-chat-user: var(--panel-soft);
+  --agent-chat-assistant: color-mix(in srgb, var(--panel-soft) 72%, var(--panel));
+  --agent-chat-control: var(--panel-soft);
+  --agent-chat-popup: var(--panel);
+  --agent-chat-disabled: color-mix(in srgb, var(--ink) 42%, transparent);
   --agent-chat-border: var(--hairline);
   --agent-chat-border-strong: var(--hairline-strong);
   --agent-chat-button-hover: var(--panel-soft);
