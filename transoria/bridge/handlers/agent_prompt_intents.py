@@ -275,6 +275,7 @@ def looks_like_prompt_quality_request(text: str) -> bool:
             "优化",
             "调整",
             "重写",
+            "设计",
             "重新设计",
             "看看",
             "看一下",

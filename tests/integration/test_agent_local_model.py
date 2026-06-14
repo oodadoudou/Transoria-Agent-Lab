@@ -21,13 +21,18 @@ import json
 import os
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from transoria.bridge import build_default_router
+from transoria.bridge.task_registry import RunningTask
+from transoria.bridge.task_service import TaskService
+from transoria.domain import TaskKind, TaskStatus
 from transoria.llm.config import ModelConfig, ProviderFormat
 from transoria.model_profiles import ModelProfileStore
+from transoria.runtime.task_record import TaskRecord
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("AGENT_E2E"),
@@ -81,8 +86,7 @@ def _endpoint_reachable() -> bool:
     return _probe("/chat/completions", method="POST", body=chat) == 200
 
 
-@pytest.fixture
-def router(tmp_path: Path):
+def _build_local_router(tmp_path: Path):
     if not _endpoint_reachable():
         pytest.skip(f"local model endpoint unreachable: {BASE_URL}")
     ModelProfileStore.from_cache_root(tmp_path).create(
@@ -100,6 +104,11 @@ def router(tmp_path: Path):
         "agent.update_workspace", {"patch": {"workflow_model_id": "local-workflow"}}
     )
     return built
+
+
+@pytest.fixture
+def router(tmp_path: Path):
+    return _build_local_router(tmp_path)
 
 
 def test_real_chat_returns_assistant_reply(router) -> None:
@@ -169,7 +178,41 @@ def test_real_agent_handles_naive_unknown_model_request(router) -> None:
     assert "key" in reply.lower() or "密钥" in reply
 
 
-def test_real_agent_drafts_dumb_glossary_workflow(router, tmp_path: Path) -> None:
+def test_real_agent_drafts_and_applies_dumb_glossary_workflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_start_agent_task(**kwargs: object) -> dict[str, object]:
+        service = kwargs["task_service"]
+        assert isinstance(service, TaskService)
+        started_at = datetime.now(timezone.utc).isoformat()
+        service.cache.save_task(
+            TaskRecord(
+                id="local-glossary-e2e",
+                kind=TaskKind.GLOSSARY,
+                status=TaskStatus.RUNNING,
+                created_at=started_at,
+                updated_at=started_at,
+            )
+        )
+        service.registry.add(
+            RunningTask(
+                task_id="local-glossary-e2e",
+                kind="glossary",
+                cache=service.cache,
+                created_at=started_at,
+            )
+        )
+        return {
+            "task_id": "local-glossary-e2e",
+            "started_at": started_at,
+        }
+
+    monkeypatch.setattr(
+        "transoria.bridge.handlers.agent.start_agent_task",
+        fake_start_agent_task,
+    )
+    router = _build_local_router(tmp_path)
     source_dir = tmp_path / "novel"
     source_dir.mkdir()
     (source_dir / "sample.txt").write_text(
@@ -202,3 +245,21 @@ def test_real_agent_drafts_dumb_glossary_workflow(router, tmp_path: Path) -> Non
     assert payload["source_language"] == "kr"
     assert payload["target_language"] == "zh"
     assert "严肃" in payload["novel_background"]
+
+    applied = router.call("agent.apply_draft", {"draft_id": draft["id"]})
+    assert applied["workspace"]["pending_draft"] is None
+    assert applied["workspace"]["active_task"]["task_id"] == "local-glossary-e2e"
+    assert applied["workspace"]["active_task"]["kind"] == "glossary"
+    final_message = applied["workspace"]["messages"][-1]["content"]
+    assert "任务 ID：local-glossary-e2e" in final_message
+    assert "术语提取 dashboard" in final_message
+
+    active = router.call("agent.get_active_task", {})
+    assert active["active_task"]["task_id"] == "local-glossary-e2e"
+    assert active["task"]["kind"] == "glossary"
+    assert active["task"]["status"] == "running"
+    recent = router.call(
+        "agent.list_recent_task_summaries",
+        {"kind": "glossary", "limit": 1},
+    )
+    assert recent["tasks"][0]["id"] == "local-glossary-e2e"

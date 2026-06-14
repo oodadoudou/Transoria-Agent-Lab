@@ -12,7 +12,7 @@ from transoria.bridge.handlers.agent_intents import (
     classify_agent_intent,
     direct_intent_sequence,
 )
-from transoria.bridge.handlers.agent import _classify_agent_intent
+from transoria.bridge.handlers.agent_response_routing import classify_message_intent
 
 
 def test_task_start_intent_wins_over_configuration_signals() -> None:
@@ -104,7 +104,7 @@ def test_direct_sequence_can_disable_task_start_route() -> None:
 
 
 def test_text_route_treats_path_and_novel_background_as_task_start() -> None:
-    intent = _classify_agent_intent(
+    intent = classify_message_intent(
         """
         /Users/doudouda/Downloads/Personal_doc/Novels/Translate/Keyword/C-苍白黎明-copy/
         输出和输入放在同一个文件夹里。BL 作品指南
@@ -120,7 +120,7 @@ def test_text_route_treats_path_and_novel_background_as_task_start() -> None:
 
 
 def test_text_route_keeps_explicit_model_copy_as_model_copy() -> None:
-    intent = _classify_agent_intent(
+    intent = classify_message_intent(
         "按照 DeepSeek-f 的模型配置复制一个新的模型配置，名字叫 DeepSeek 4 Pro，model_id 用 deepseek-v4-pro。"
     )
 
@@ -128,7 +128,7 @@ def test_text_route_keeps_explicit_model_copy_as_model_copy() -> None:
 
 
 def test_text_route_keeps_glossary_review_prompt_creation_as_prompt_preset() -> None:
-    intent = _classify_agent_intent(
+    intent = classify_message_intent(
         "请新建一套术语审查 Prompt，名字叫小说术语审查预设，重点检查人名一致性和 ABO 设定继承。"
     )
 
@@ -136,15 +136,23 @@ def test_text_route_keeps_glossary_review_prompt_creation_as_prompt_preset() -> 
 
 
 def test_text_route_prefers_workflow_start_when_model_words_are_incidental() -> None:
-    intent = _classify_agent_intent(
+    intent = classify_message_intent(
         "用我现在配置好的 DeepSeek 模型跑术语表 workflow，input 是 /Users/me/book，output 同目录，背景：现代 BL。"
     )
 
     assert intent.kind == INTENT_TASK_START
 
 
+def test_text_route_prefers_workflow_start_when_model_context_is_noisy() -> None:
+    intent = classify_message_intent(
+        "先别管刚才那个 DeepSeek 4 Pro 模型创建草案了，直接处理术语：/Users/me/book，输出和输入一样，背景是现代 BL。"
+    )
+
+    assert intent.kind == INTENT_TASK_START
+
+
 def test_text_route_keeps_glossary_workflow_above_compound_config_words() -> None:
-    intent = _classify_agent_intent(
+    intent = classify_message_intent(
         "提取术语，input 是 /Users/me/book，output 同目录，并发沿用当前模型配置，背景是现代 BL。"
     )
 
@@ -152,7 +160,7 @@ def test_text_route_keeps_glossary_workflow_above_compound_config_words() -> Non
 
 
 def test_text_route_detects_compound_config_batch_request() -> None:
-    intent = _classify_agent_intent(
+    intent = classify_message_intent(
         "请准备配置修改草案：把模型 agy-cli-f 的并发数改成 4，把翻译 Prompt「默认」重命名为「标准中文翻译预设」，并把当前阶段配置保存成「测试复合配置」预设。"
     )
 
@@ -160,15 +168,23 @@ def test_text_route_detects_compound_config_batch_request() -> None:
 
 
 def test_text_route_keeps_translation_quality_advice_above_prompt_creation() -> None:
-    intent = _classify_agent_intent(
+    intent = classify_message_intent(
         "现在翻译效果不好，文风很怪而且有人名不一致，我想修改 prompt，你帮我诊断一下应该怎么改。"
     )
 
     assert intent.kind == INTENT_PROMPT_QUALITY
 
 
+def test_text_route_treats_prompt_design_for_bad_translation_as_quality_request() -> None:
+    intent = classify_message_intent(
+        "翻译效果不好，我想让你帮我设计一个新的翻译 prompt，文风要更自然，人名一致，不要现在就启动任务。"
+    )
+
+    assert intent.kind == INTENT_PROMPT_QUALITY
+
+
 def test_text_route_handles_vague_model_setup_help() -> None:
-    intent = _classify_agent_intent(
+    intent = classify_message_intent(
         "我想加一个新模型，但是不知道 base url 和 model id 怎么填，你帮我配置一下。"
     )
 
@@ -176,7 +192,7 @@ def test_text_route_handles_vague_model_setup_help() -> None:
 
 
 def test_text_route_handles_existing_inventory_model_upgrade() -> None:
-    intent = _classify_agent_intent(
+    intent = classify_message_intent(
         "我想把工作模型换成模型库里更强的模型，你帮我看一下并生成修改方案。"
     )
 
