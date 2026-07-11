@@ -65,7 +65,15 @@ class IntentRouteSpec:
     blocked_by: tuple[str, ...] = ()
 
     def matches(self, text: str) -> bool:
-        return self.signal(text) and not _route_is_blocked(self.kind, text)
+        return _intent_route_decision_by_kind(text)[self.kind].matched
+
+
+@dataclass(frozen=True)
+class IntentRouteDecision:
+    kind: str
+    raw_match: bool
+    blocked_by: tuple[str, ...]
+    matched: bool
 
 
 def _raw_task_start_request(text: str) -> bool:
@@ -120,13 +128,47 @@ INTENT_ROUTE_SPECS: tuple[IntentRouteSpec, ...] = (
 _INTENT_ROUTE_SPEC_BY_KIND = {spec.kind: spec for spec in INTENT_ROUTE_SPECS}
 
 
+def classify_message_intent_details(text: str) -> tuple[IntentRouteDecision, ...]:
+    """Return per-route raw signals and blockers for tests and diagnostics."""
+
+    return tuple(_intent_route_decision_by_kind(text)[spec.kind] for spec in INTENT_ROUTE_SPECS)
+
+
+def _intent_route_decision_by_kind(text: str) -> dict[str, IntentRouteDecision]:
+    raw_signals = {spec.kind: spec.signal(text) for spec in INTENT_ROUTE_SPECS}
+    matched_cache: dict[str, bool] = {}
+
+    def route_matched(kind: str) -> bool:
+        cached = matched_cache.get(kind)
+        if cached is not None:
+            return cached
+        spec = _INTENT_ROUTE_SPEC_BY_KIND[kind]
+        matched = raw_signals[kind] and not any(
+            route_matched(blocker_kind) for blocker_kind in spec.blocked_by
+        )
+        matched_cache[kind] = matched
+        return matched
+
+    for spec in INTENT_ROUTE_SPECS:
+        route_matched(spec.kind)
+
+    return {
+        spec.kind: IntentRouteDecision(
+            kind=spec.kind,
+            raw_match=raw_signals[spec.kind],
+            blocked_by=tuple(
+                blocker_kind
+                for blocker_kind in spec.blocked_by
+                if route_matched(blocker_kind)
+            ),
+            matched=matched_cache[spec.kind],
+        )
+        for spec in INTENT_ROUTE_SPECS
+    }
+
+
 def _route_is_blocked(kind: str, text: str) -> bool:
-    spec = _INTENT_ROUTE_SPEC_BY_KIND[kind]
-    for blocker_kind in spec.blocked_by:
-        blocker = _INTENT_ROUTE_SPEC_BY_KIND[blocker_kind]
-        if blocker.matches(text):
-            return True
-    return False
+    return bool(_intent_route_decision_by_kind(text)[kind].blocked_by)
 
 
 def _route_blocker(kind: str) -> IntentSignal:
@@ -134,7 +176,10 @@ def _route_blocker(kind: str) -> IntentSignal:
 
 
 def classify_message_intent(text: str) -> AgentIntent:
-    signals = {spec.kind: spec.matches(text) for spec in INTENT_ROUTE_SPECS}
+    signals = {
+        decision.kind: decision.matched
+        for decision in classify_message_intent_details(text)
+    }
     return classify_intent_from_signals(
         AgentIntentSignals(
             task_start=signals[INTENT_TASK_START],

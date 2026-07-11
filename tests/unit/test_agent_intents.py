@@ -12,7 +12,10 @@ from transoria.bridge.handlers.agent_intents import (
     classify_agent_intent,
     direct_intent_sequence,
 )
-from transoria.bridge.handlers.agent_response_routing import classify_message_intent
+from transoria.bridge.handlers.agent_response_routing import (
+    classify_message_intent,
+    classify_message_intent_details,
+)
 
 
 def test_task_start_intent_wins_over_configuration_signals() -> None:
@@ -101,6 +104,70 @@ def test_direct_sequence_can_disable_task_start_route() -> None:
         INTENT_MODEL_PROFILE_COPY,
         INTENT_MODEL_UPGRADE,
     )
+
+
+def test_text_route_matrix_covers_known_agent_lab_user_phrasings() -> None:
+    cases = (
+        (
+            "提取术语：/Users/me/book，输出和输入一样，背景是现代 BL。",
+            INTENT_TASK_START,
+        ),
+        (
+            "请准备配置修改草案：把模型 agy-cli-f 的并发数改成 4，并保存当前配置。",
+            INTENT_COMPOUND_CONFIG,
+        ),
+        (
+            "翻译效果不好，文风很怪，我想让你帮我设计一个新的翻译 prompt。",
+            INTENT_PROMPT_QUALITY,
+        ),
+        (
+            "请新建一套术语审查 Prompt，名字叫小说术语审查预设。",
+            INTENT_PROMPT_PRESET,
+        ),
+        (
+            "我想加一个新模型，但是不知道 base url 和 model id 怎么填。",
+            INTENT_MODEL_PROFILE_GUIDANCE,
+        ),
+        (
+            "按照 DeepSeek-f 的模型配置复制一个新的模型配置，名字叫 DeepSeek 4 Pro。",
+            INTENT_MODEL_PROFILE_COPY,
+        ),
+        (
+            "我想把工作模型换成模型库里更强的模型，你帮我看一下。",
+            INTENT_MODEL_UPGRADE,
+        ),
+    )
+
+    for text, expected in cases:
+        assert classify_message_intent(text).kind == expected
+
+
+def test_text_route_details_show_task_start_blocking_incidental_config_words() -> None:
+    details = {
+        decision.kind: decision
+        for decision in classify_message_intent_details(
+            "提取术语，input 是 /Users/me/book，output 同目录，并发沿用当前模型配置，背景是现代 BL。"
+        )
+    }
+
+    assert details[INTENT_TASK_START].matched is True
+    assert details[INTENT_COMPOUND_CONFIG].raw_match is True
+    assert details[INTENT_COMPOUND_CONFIG].blocked_by == (INTENT_TASK_START,)
+    assert details[INTENT_COMPOUND_CONFIG].matched is False
+
+
+def test_text_route_details_show_model_copy_blocking_incidental_config_words() -> None:
+    details = {
+        decision.kind: decision
+        for decision in classify_message_intent_details(
+            "按照 DeepSeek-f 的模型配置复制一个新的模型配置，名字叫 DeepSeek Pro，并发数也沿用。"
+        )
+    }
+
+    assert details[INTENT_MODEL_PROFILE_COPY].matched is True
+    assert details[INTENT_COMPOUND_CONFIG].raw_match is True
+    assert details[INTENT_COMPOUND_CONFIG].blocked_by == (INTENT_MODEL_PROFILE_COPY,)
+    assert details[INTENT_COMPOUND_CONFIG].matched is False
 
 
 def test_text_route_treats_path_and_novel_background_as_task_start() -> None:
